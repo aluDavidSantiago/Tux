@@ -1,4 +1,4 @@
-// Módulo de perfiles: documento users/{uid} con nickname, avatar, bio y fecha de registro.
+// Módulo de perfiles: documento users/{uid} con nickname, avatar, bio, preferencias y fecha de registro.
 import {
   doc,
   getDoc,
@@ -8,6 +8,7 @@ import {
   serverTimestamp
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { db } from "./firebaseConfig.js";
+import { DEFAULT_PREFS } from "./plans.js";
 
 // Colores disponibles para el avatar del pingüino.
 export const AVATAR_COLORS = ["orange", "ice", "mint", "lilac", "night"];
@@ -46,6 +47,7 @@ async function createIfMissing(user) {
     photoURL: (user.photoURL || "").slice(0, 500),
     avatarColor: "orange",
     bio: "Explorando planes sencillos con Tux 🐧",
+    prefs: { ...DEFAULT_PREFS },
     createdAt: serverTimestamp()
   };
   try {

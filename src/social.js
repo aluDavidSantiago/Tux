@@ -1,5 +1,5 @@
-// Módulo social: "Me apunto" (likes), guardados, cumplidos y comentarios.
-// likes/{uid}_{activityId}, saved/{uid}_{activityId}, completed/{uid}_{activityId}:
+// Módulo social: "Me apunto" (likes), guardados y comentarios.
+// likes/{uid}_{activityId}, saved/{uid}_{activityId}:
 //   { uid, activityId, createdAt }
 // activities/{id}/comments/{commentId}: { authorId, authorName, text, createdAt }
 import {
@@ -32,7 +32,6 @@ function watchRelation(name, uid, callback) {
 
 export const watchLikes = (uid, cb) => watchRelation("likes", uid, cb);
 export const watchSaved = (uid, cb) => watchRelation("saved", uid, cb);
-export const watchCompleted = (uid, cb) => watchRelation("completed", uid, cb);
 
 // El like y el contador se escriben en el mismo batch; las reglas verifican ambos.
 export async function setLike(uid, activityId, liked) {
@@ -51,7 +50,6 @@ async function setRelation(name, uid, activityId, on) {
 }
 
 export const setSaved = (uid, activityId, on) => setRelation("saved", uid, activityId, on);
-export const setCompleted = (uid, activityId, on) => setRelation("completed", uid, activityId, on);
 
 /* ---------- Comentarios ---------- */
 const commentsCol = (activityId) => collection(db, "activities", activityId, "comments");

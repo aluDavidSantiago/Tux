@@ -3,37 +3,34 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-  <meta name="description" content="Tux: descubre y comparte planes casuales, económicos y de bajo esfuerzo.">
+  <meta name="description" content="Tux: tu actividad estrella del día, planes casuales y contenido 360° de la comunidad.">
   <meta name="theme-color" content="#0D0D0E">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>Tux</title>
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect x='14' y='4' width='36' height='52' rx='18' fill='%230D0D0E'/><path d='M32 17.5C29.6 14.6 20 14 20 23v15.5C20 46 25.4 52 32 52s12-6 12-13.5V23c0-9-9.6-8.4-12-5.5z' fill='%23fff'/><circle cx='26.5' cy='25' r='2.2' fill='%230D0D0E'/><circle cx='37.5' cy='25' r='2.2' fill='%230D0D0E'/><path d='M28.6 30.5h6.8l-3.4 5z' fill='%23FF6B35'/><rect x='19' y='55' width='10' height='5' rx='2.5' fill='%23FF6B35'/><rect x='35' y='55' width='10' height='5' rx='2.5' fill='%23FF6B35'/></svg>">
+  <link rel="icon" type="image/png" href="./img/favicon.png">
+  <link rel="apple-touch-icon" href="./img/apple-touch-icon.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="./css/styles.css">
   <script>
-    // Aplica el tema guardado antes del primer pintado para evitar parpadeos.
+    // Tema antes del primer pintado. Por defecto: oscuro OLED.
     try {
-      const t = localStorage.getItem("tux-theme");
+      const t = localStorage.getItem("tux-theme") || "dark";
       if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
-    } catch (e) {}
+    } catch (e) {
+      document.documentElement.dataset.theme = "dark";
+    }
   </script>
 </head>
 <body>
-  <!-- ============ Sprite: mascota e iconos ============ -->
+  <!-- ============ Sprite de iconos ============ -->
   <svg width="0" height="0" style="position:absolute" aria-hidden="true">
-    <!-- Tux: geometría plana. Cuerpo = currentColor, cara = --tux-belly, pico/patas = --tux-accent -->
-    <symbol id="tux" viewBox="0 0 64 64">
-      <rect x="14" y="4" width="36" height="52" rx="18" fill="currentColor"/>
-      <path d="M32 17.5C29.6 14.6 20 14 20 23v15.5C20 46 25.4 52 32 52s12-6 12-13.5V23c0-9-9.6-8.4-12-5.5z" fill="var(--tux-belly, #fff)"/>
-      <circle cx="26.5" cy="25" r="2.2" fill="currentColor"/>
-      <circle cx="37.5" cy="25" r="2.2" fill="currentColor"/>
-      <path d="M28.6 30.5h6.8a.8.8 0 0 1 .6 1.3l-3.4 4a.8.8 0 0 1-1.2 0l-3.4-4a.8.8 0 0 1 .6-1.3z" fill="var(--tux-accent, #FF6B35)"/>
-      <rect x="19" y="55" width="10" height="5" rx="2.5" fill="var(--tux-accent, #FF6B35)"/>
-      <rect x="35" y="55" width="10" height="5" rx="2.5" fill="var(--tux-accent, #FF6B35)"/>
-    </symbol>
-
-    <symbol id="i-home" viewBox="0 0 24 24"><path d="M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/></symbol>
+    <symbol id="i-star" viewBox="0 0 24 24"><path d="m12 3.5 2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3.5 7.5a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></symbol>
+    <symbol id="i-vr" viewBox="0 0 24 24"><path d="M3 9a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2h-3.5l-2-2.5h-3l-2 2.5H5a2 2 0 0 1-2-2z"/><circle cx="8" cy="12" r="1.6"/><circle cx="16" cy="12" r="1.6"/></symbol>
+    <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></symbol>
     <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
     <symbol id="i-user" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-7 8-7s8 3 8 7"/></symbol>
     <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></symbol>
@@ -43,7 +40,6 @@
     <symbol id="i-bookmark" viewBox="0 0 24 24"><path d="M6.5 3.5h11v17l-5.5-4-5.5 4z"/></symbol>
     <symbol id="i-check" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m8 12.2 2.8 2.8L16 9.5"/></symbol>
     <symbol id="i-share" viewBox="0 0 24 24"><path d="M12 3.5v11M7.5 8 12 3.5 16.5 8M5 13.5V19a1.5 1.5 0 0 0 1.5 1.5h11A1.5 1.5 0 0 0 19 19v-5.5"/></symbol>
-    <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></symbol>
     <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></symbol>
     <symbol id="i-send" viewBox="0 0 24 24"><path d="M21 3 10 14M21 3l-6.5 18-4.5-7-7-4.5z"/></symbol>
     <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></symbol>
@@ -51,17 +47,52 @@
     <symbol id="i-edit" viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16z"/></symbol>
     <symbol id="i-logout" viewBox="0 0 24 24"><path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3M10 8l-4 4 4 4M6 12h10"/></symbol>
     <symbol id="i-image" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><circle cx="9" cy="10" r="1.6"/><path d="m4 17 5-4.5 4 3.5 3-2.5 4 3.5"/></symbol>
+    <symbol id="i-back" viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
+    <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 15.5V4M7.5 8.5 12 4l4.5 4.5M4.5 15v3a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-3"/></symbol>
+    <symbol id="i-restore" viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.4-5.7M4 4.5v4h4"/></symbol>
+    <symbol id="i-compass" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m15.5 8.5-2 5-5 2 2-5z"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5.5v13l10.5-6.5z"/></symbol>
+    <symbol id="i-volume" viewBox="0 0 24 24"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4zM16 9a4 4 0 0 1 0 6M18.5 6.5a7.5 7.5 0 0 1 0 11"/></symbol>
+    <symbol id="i-mute" viewBox="0 0 24 24"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4zM16.5 9.5l5 5M21.5 9.5l-5 5"/></symbol>
+    <symbol id="i-orbit" viewBox="0 0 24 24"><ellipse cx="12" cy="12" rx="9" ry="4"/><path d="M12 3a4 9 0 0 1 0 18"/><circle cx="12" cy="12" r="1.5"/></symbol>
   </svg>
 
-  <div class="app" id="app" data-view="feed">
+  <div class="app" id="app" data-view="dashboard">
 
-    <!-- ============ Vista: Feed ============ -->
-    <section class="view view-feed is-active" id="view-feed" aria-label="Feed de planes">
+    <!-- ============ Cabecera ============ -->
+    <header class="app-header">
+      <a class="brand" href="./" aria-label="Tux inicio">
+        <img class="brand-logo" src="./img/logo.png" alt="" draggable="false">
+        <span>tux</span>
+      </a>
+      <button class="header-avatar" id="header-avatar" type="button" aria-label="Perfil"></button>
+    </header>
+
+    <!-- ============ Vistas ============ -->
+    <section class="view is-active" id="view-dashboard" aria-label="Panel">
+      <div class="page" id="dashboard"></div>
+    </section>
+
+    <section class="view" id="view-plans" aria-label="Mis planes">
+      <div class="page" id="plans"></div>
+    </section>
+
+    <section class="view" id="view-vr" aria-label="Galería VR">
+      <div class="page" id="vr"></div>
+    </section>
+
+    <section class="view" id="view-settings" aria-label="Ajustes">
+      <div class="page" id="settings"></div>
+    </section>
+
+    <!-- Feed de exploración (capa a pantalla completa, se abre desde el Panel) -->
+    <section class="view view-feed" id="view-feed" aria-label="Explorar planes">
       <header class="feed-top">
-        <a class="brand" href="./" aria-label="Tux inicio">
-          <svg class="brand-mark"><use href="#tux"/></svg>
-          <span>tux</span>
-        </a>
+        <button class="glass-btn" id="feed-back" type="button" aria-label="Volver al panel">
+          <svg class="icon"><use href="#i-back"/></svg>
+        </button>
+        <span class="feed-title">Explorar</span>
         <div class="feed-top-actions">
           <button class="glass-btn" id="search-btn" type="button" aria-label="Buscar">
             <svg class="icon"><use href="#i-search"/></svg>
@@ -73,29 +104,24 @@
         </div>
       </header>
       <div class="active-filters" id="active-filters" aria-label="Filtros activos"></div>
-
       <main class="feed" id="feed" aria-live="polite">
-        <div class="feed-loading">
-          <svg class="loading-mark"><use href="#tux"/></svg>
-        </div>
+        <div class="feed-loading"><img class="loading-mark tux-logo" src="./img/logo.png" alt=""></div>
       </main>
-    </section>
-
-    <!-- ============ Vista: Perfil ============ -->
-    <section class="view view-profile" id="view-profile" aria-label="Perfil">
-      <div class="profile" id="profile"></div>
     </section>
 
     <!-- ============ Navegación ============ -->
     <nav class="tabbar" aria-label="Navegación principal">
-      <button class="tab-item is-active" type="button" data-nav="feed">
-        <svg class="icon"><use href="#i-home"/></svg><span>Inicio</span>
+      <button class="tab-item is-active" type="button" data-nav="dashboard">
+        <svg class="icon"><use href="#i-star"/></svg><span>Panel</span>
       </button>
-      <button class="tab-new" type="button" data-nav="create" aria-label="Publicar TuxPlan">
-        <svg class="icon"><use href="#i-plus"/></svg>
+      <button class="tab-item" type="button" data-nav="plans">
+        <svg class="icon"><use href="#i-folder"/></svg><span>Mis planes</span>
       </button>
-      <button class="tab-item" type="button" data-nav="profile">
-        <svg class="icon"><use href="#i-user"/></svg><span>Perfil</span>
+      <button class="tab-item" type="button" data-nav="vr">
+        <svg class="icon"><use href="#i-vr"/></svg><span>Galería VR</span>
+      </button>
+      <button class="tab-item" type="button" data-nav="settings">
+        <svg class="icon"><use href="#i-gear"/></svg><span>Ajustes</span>
       </button>
     </nav>
   </div>
@@ -105,7 +131,7 @@
     <div class="sheet-grabber"></div>
     <button class="sheet-close" type="button" data-close aria-label="Cerrar"><svg class="icon"><use href="#i-x"/></svg></button>
     <div class="auth-hero">
-      <svg class="auth-mark"><use href="#tux"/></svg>
+      <img class="auth-mark tux-logo" src="./img/logo.png" alt="">
       <h2 id="auth-title">Bienvenido a Tux</h2>
       <p id="auth-subtitle">Planes sencillos, cerca de ti.</p>
     </div>
@@ -142,6 +168,7 @@
   <dialog tabindex="-1" class="sheet" id="filters-modal" aria-labelledby="filters-title">
     <div class="sheet-grabber"></div>
     <header class="sheet-header">
+      <span class="sheet-header-spacer"></span>
       <h2 id="filters-title">Filtros</h2>
       <button class="link-btn" type="button" id="filters-clear">Limpiar</button>
     </header>
@@ -149,22 +176,10 @@
       <svg class="icon"><use href="#i-search"/></svg>
       <input type="search" id="search-input" placeholder="Buscar planes, ideas, lugares…" autocomplete="off">
     </label>
-    <div class="filter-section">
-      <h3>Presupuesto</h3>
-      <div class="chips" data-filter="budget"></div>
-    </div>
-    <div class="filter-section">
-      <h3>Energía</h3>
-      <div class="chips" data-filter="effort"></div>
-    </div>
-    <div class="filter-section">
-      <h3>Vibe</h3>
-      <div class="chips" data-filter="category"></div>
-    </div>
-    <div class="filter-section">
-      <h3>Cuándo</h3>
-      <div class="chips" data-filter="when"></div>
-    </div>
+    <div class="filter-section"><h3>Presupuesto</h3><div class="chips" data-filter="budget"></div></div>
+    <div class="filter-section"><h3>Energía</h3><div class="chips" data-filter="effort"></div></div>
+    <div class="filter-section"><h3>Vibe</h3><div class="chips" data-filter="category"></div></div>
+    <div class="filter-section"><h3>Cuándo</h3><div class="chips" data-filter="when"></div></div>
     <button class="primary-btn" type="button" data-close id="filters-apply">Ver planes</button>
   </dialog>
 
@@ -186,28 +201,13 @@
         <span>Descripción <em class="counter" data-for="description">0/280</em></span>
         <textarea name="description" maxlength="280" rows="3" placeholder="Cuéntalo en una o dos frases."></textarea>
       </label>
-      <div class="field">
-        <span>Vibe</span>
-        <div class="chips" data-pick="category"></div>
-      </div>
-      <div class="field">
-        <span>Presupuesto</span>
-        <div class="chips" data-pick="budget"></div>
-      </div>
-      <div class="field">
-        <span>Energía</span>
-        <div class="chips" data-pick="effort"></div>
-      </div>
-      <div class="field">
-        <span>Cuándo</span>
-        <div class="chips" data-pick="when"></div>
-      </div>
-      <div class="field">
-        <span>Tiempo estimado</span>
-        <div class="chips" data-pick="duration"></div>
-      </div>
+      <div class="field"><span>Vibe</span><div class="chips" data-pick="category"></div></div>
+      <div class="field"><span>Presupuesto</span><div class="chips" data-pick="budget"></div></div>
+      <div class="field"><span>Energía</span><div class="chips" data-pick="effort"></div></div>
+      <div class="field"><span>Cuándo</span><div class="chips" data-pick="when"></div></div>
+      <div class="field"><span>Tiempo estimado</span><div class="chips" data-pick="duration"></div></div>
       <label class="field">
-        <span>Imagen <em class="hint">opcional · URL https (Unsplash u otra)</em></span>
+        <span>Imagen <em class="hint">opcional · URL https (admite 360°)</em></span>
         <div class="input-icon">
           <svg class="icon"><use href="#i-image"/></svg>
           <input type="url" name="imageUrl" maxlength="500" placeholder="Vacío = ilustración de Tux" inputmode="url">
@@ -234,33 +234,11 @@
     </form>
   </dialog>
 
-  <!-- ============ Modal: Ajustes ============ -->
-  <dialog tabindex="-1" class="sheet" id="settings-modal" aria-labelledby="settings-title">
+  <!-- ============ Modal: Perfil ============ -->
+  <dialog tabindex="-1" class="sheet sheet-tall" id="profile-modal" aria-label="Perfil">
     <div class="sheet-grabber"></div>
-    <header class="sheet-header">
-      <span class="sheet-header-spacer"></span>
-      <h2 id="settings-title">Ajustes</h2>
-      <button class="sheet-close static" type="button" data-close aria-label="Cerrar"><svg class="icon"><use href="#i-x"/></svg></button>
-    </header>
-    <div class="settings-group">
-      <h3>Apariencia</h3>
-      <div class="segmented three" id="theme-switch" role="radiogroup" aria-label="Tema">
-        <button type="button" data-theme-option="light" role="radio">Claro</button>
-        <button type="button" data-theme-option="dark" role="radio">Oscuro</button>
-        <button type="button" data-theme-option="system" role="radio">Sistema</button>
-        <span class="segmented-thumb"></span>
-      </div>
-    </div>
-    <div class="settings-group" id="settings-account">
-      <h3>Cuenta</h3>
-      <button class="settings-row" type="button" id="edit-profile-btn">
-        <svg class="icon"><use href="#i-edit"/></svg> Editar perfil
-      </button>
-      <button class="settings-row danger" type="button" id="logout-btn">
-        <svg class="icon"><use href="#i-logout"/></svg> Cerrar sesión
-      </button>
-    </div>
-    <p class="settings-foot">Tux · hecho con calma 🐧</p>
+    <button class="sheet-close" type="button" data-close aria-label="Cerrar"><svg class="icon"><use href="#i-x"/></svg></button>
+    <div id="profile-content"></div>
   </dialog>
 
   <!-- ============ Modal: Editar perfil ============ -->
@@ -272,10 +250,7 @@
       <span class="sheet-header-spacer"></span>
     </header>
     <form class="form" id="edit-form" novalidate>
-      <div class="field">
-        <span>Color de tu Tux</span>
-        <div class="swatches" id="avatar-swatches"></div>
-      </div>
+      <div class="field"><span>Color de tu avatar</span><div class="swatches" id="avatar-swatches"></div></div>
       <label class="field">
         <span>Nickname <em class="counter" data-for="nickname">0/24</em></span>
         <input type="text" name="nickname" maxlength="24" required>
@@ -293,10 +268,87 @@
     </form>
   </dialog>
 
+  <!-- ============ Modal: Justificación de descarte ============ -->
+  <dialog tabindex="-1" class="sheet" id="discard-modal" aria-labelledby="discard-title">
+    <div class="sheet-grabber"></div>
+    <header class="sheet-header">
+      <button class="link-btn" type="button" data-close>Cancelar</button>
+      <h2 id="discard-title">Justificación de descarte</h2>
+      <span class="sheet-header-spacer"></span>
+    </header>
+    <p class="sheet-lead">¿Por qué descartas <b id="discard-plan"></b>? Tu respuesta afina las próximas sugerencias.</p>
+    <form class="form" id="discard-form" novalidate>
+      <div class="reason-list" id="discard-reasons" role="radiogroup" aria-label="Motivo"></div>
+      <label class="field" id="discard-note-field" hidden>
+        <span><span id="discard-note-label">Comentario (opcional)</span> <em class="counter" data-for="note">0/280</em></span>
+        <textarea name="note" maxlength="280" rows="2" placeholder="Añade un detalle…"></textarea>
+      </label>
+      <p class="form-hint">El plan irá a la papelera y Tux no volverá a sugerirlo, salvo que lo restaures.</p>
+      <p class="form-error" id="discard-error" role="alert"></p>
+      <button class="primary-btn danger" type="submit" id="discard-submit" disabled>Descartar plan</button>
+    </form>
+  </dialog>
+
+  <!-- ============ Modal: Completar con prueba ============ -->
+  <dialog tabindex="-1" class="sheet sheet-tall" id="complete-modal" aria-labelledby="complete-title">
+    <div class="sheet-grabber"></div>
+    <header class="sheet-header">
+      <button class="link-btn" type="button" data-close>Cancelar</button>
+      <h2 id="complete-title">Completar plan</h2>
+      <span class="sheet-header-spacer"></span>
+    </header>
+    <p class="sheet-lead">Para cerrar <b id="complete-plan"></b> adjunta una prueba: una foto o un vídeo corto. También admite 360°/VR.</p>
+    <form class="form" id="complete-form" novalidate>
+      <label class="dropzone" id="dropzone">
+        <input type="file" id="proof-input" class="visually-hidden">
+        <span class="dropzone-empty" id="dropzone-empty">
+          <span class="dropzone-icon"><svg class="icon"><use href="#i-upload"/></svg></span>
+          <b>Elige o arrastra tu prueba</b>
+          <small>JPG o PNG hasta 10 MB · MP4 hasta 100 MB</small>
+        </span>
+        <span class="dropzone-preview" id="proof-preview" hidden></span>
+      </label>
+      <div class="proof-meta" id="proof-meta" hidden>
+        <span class="proof-info" id="proof-info"></span>
+        <label class="toggle">
+          <input type="checkbox" id="proof-360">
+          <span class="toggle-track"><span class="toggle-thumb"></span></span>
+          <span>360° / VR</span>
+        </label>
+      </div>
+      <label class="field">
+        <span>Comentario <em class="hint">opcional</em></span>
+        <input type="text" name="caption" maxlength="200" placeholder="¿Qué tal fue?">
+      </label>
+      <div class="progress" id="proof-progress" hidden><span></span></div>
+      <p class="form-error" id="complete-error" role="alert"></p>
+      <button class="primary-btn" type="submit" id="complete-submit" disabled>Completar plan</button>
+    </form>
+  </dialog>
+
   <!-- ============ Modal: Detalle de plan ============ -->
   <dialog tabindex="-1" class="sheet sheet-plan" id="plan-modal" aria-label="Plan">
     <button class="sheet-close on-media" type="button" data-close aria-label="Cerrar"><svg class="icon"><use href="#i-x"/></svg></button>
     <div class="plan-holder" id="plan-holder"></div>
+  </dialog>
+
+  <!-- ============ Modal: Visor multimedia / 360° ============ -->
+  <dialog tabindex="-1" class="sheet viewer" id="viewer-modal" aria-label="Visor multimedia">
+    <div class="viewer-stage" id="viewer-stage"></div>
+    <div class="viewer-loading" id="viewer-loading" hidden><img class="loading-mark tux-logo" src="./img/logo.png" alt=""></div>
+    <div class="viewer-top">
+      <span class="badge-360" id="viewer-badge" hidden><svg class="icon"><use href="#i-orbit"/></svg>360°</span>
+      <button class="sheet-close on-media static" type="button" data-close aria-label="Cerrar"><svg class="icon"><use href="#i-x"/></svg></button>
+    </div>
+    <div class="viewer-bottom">
+      <div class="viewer-caption">
+        <b id="viewer-title"></b>
+        <span id="viewer-sub"></span>
+      </div>
+      <button class="glass-btn" id="viewer-sound" type="button" aria-label="Activar sonido" hidden>
+        <svg class="icon"><use href="#i-mute"/></svg>
+      </button>
+    </div>
   </dialog>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>

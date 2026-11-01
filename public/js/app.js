@@ -1,4 +1,5 @@
-// Tux · lógica de la interfaz (feed, filtros, auth, perfil, publicación y comentarios).
+// Tux · orquestador de la interfaz: Panel (actividad estrella), Mis planes, Galería VR,
+// Ajustes, feed de exploración, autenticación y modales.
 import {
   CATEGORIES, BUDGETS, EFFORTS, WHEN, DURATIONS, SAMPLE_ACTIVITIES,
   watchActivities, getActivity, getActivitiesByAuthor, createActivity, deleteActivity,
@@ -10,70 +11,24 @@ import {
 } from "../../src/auth.js";
 import { AVATAR_COLORS, ensureUserProfile, watchUserProfile, updateUserProfile } from "../../src/users.js";
 import {
-  watchLikes, watchSaved, watchCompleted, setLike, setSaved, setCompleted,
-  watchComments, addComment, deleteComment
+  watchLikes, watchSaved, setLike, setSaved, watchComments, addComment, deleteComment
 } from "../../src/social.js";
+import {
+  FREQUENCIES, DISCARD_REASONS, normalizePrefs, savePrefs, saveStar, watchHistory, setHistory, restoreFromTrash
+} from "../../src/plans.js";
+import { currentPeriod, msUntilNextPeriod, pickStar, scoreActivity } from "../../src/recommendations.js";
+import {
+  ACCEPT_ATTR, validateFile, probeMedia, isEquirectangular, uploadToCloudinary, cloudinaryThumb,
+  createProof, watchVrProofs, SAMPLE_VR
+} from "../../src/media.js";
+import { isMediaConfigured } from "../../src/mediaConfig.js";
+import {
+  $, $$, h, svgUse, tuxLogo, formatCount, timeAgo, formatCountdown, toast, setLoading, setThumb,
+  openModal, closeModal, initModals
+} from "./ui.js";
+import { mountVrScene } from "./vr.js";
 
-/* ==========================================================
-   Utilidades
-   ========================================================== */
-const $ = (sel, root = document) => root.querySelector(sel);
-const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
-const SVG_NS = "http://www.w3.org/2000/svg";
-
-function h(tag, props = {}, ...children) {
-  const el = document.createElement(tag);
-  for (const [key, value] of Object.entries(props)) {
-    if (value == null || value === false) continue;
-    if (key === "class") el.className = value;
-    else if (key === "text") el.textContent = value;
-    else if (key === "dataset") Object.assign(el.dataset, value);
-    else if (key.startsWith("on")) el.addEventListener(key.slice(2), value);
-    else el.setAttribute(key, value === true ? "" : value);
-  }
-  for (const child of children.flat()) {
-    if (child != null && child !== false) el.append(child);
-  }
-  return el;
-}
-
-function svgUse(id, cls = "icon") {
-  const svg = document.createElementNS(SVG_NS, "svg");
-  svg.setAttribute("class", cls);
-  svg.setAttribute("aria-hidden", "true");
-  const use = document.createElementNS(SVG_NS, "use");
-  use.setAttribute("href", `#${id}`);
-  svg.append(use);
-  return svg;
-}
-
-const formatCount = (n = 0) =>
-  n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1).replace(".0", "")}k` : String(Math.max(0, n));
-
-function timeAgo(ts) {
-  const ms = millis(ts);
-  if (!ms) return "ahora";
-  const s = Math.floor((Date.now() - ms) / 1000);
-  if (s < 60) return "ahora";
-  if (s < 3600) return `${Math.floor(s / 60)} min`;
-  if (s < 86400) return `${Math.floor(s / 3600)} h`;
-  if (s < 604800) return `${Math.floor(s / 86400)} d`;
-  return new Date(ms).toLocaleDateString("es", { day: "numeric", month: "short" });
-}
-
-let toastTimer;
-function toast(message) {
-  const el = $("#toast");
-  el.textContent = message;
-  el.classList.add("is-visible");
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.classList.remove("is-visible"), 2600);
-}
-
-function setLoading(button, loading) {
-  button.classList.toggle("is-loading", loading);
-  button.disabled = loading;
-}
+export const APP_VERSION = "1.0.0-beta";
 
 /* ==========================================================
    Estado
@@ -81,25 +36,34 @@ function setLoading(button, loading) {
 const state = {
   user: null,
   profile: null,
-  remote: [],            // planes de Firestore (tiempo real)
+  profileLoaded: false,
+  history: new Map(),      // activityId → { status, reason, proofUrl… }
+  historyLoaded: false,
+  guestStar: null,
+  remote: [],
   feedReady: false,
   liked: new Set(),
-  saved: [],             // ids, más recientes primero
-  completed: [],
+  saved: [],
   myPlans: [],
+  vr: [],
   filters: { budget: new Set(), effort: new Set(), category: new Set(), when: new Set(), search: "" },
-  view: "feed",
-  profileTab: "mine",
+  view: "dashboard",
+  plansTab: "accepted",
   feedKey: null
 };
 
-const cache = new Map(); // id → actividad (para perfil y detalle)
+const cache = new Map();
 let sessionUnsubs = [];
+const renderSig = {};
 
 const usingSamples = () => state.feedReady && state.remote.length === 0;
 const feedSource = () => (usingSamples() ? SAMPLE_ACTIVITIES : state.remote);
 const findActivity = (id) =>
   state.remote.find((a) => a.id === id) || SAMPLE_ACTIVITIES.find((a) => a.id === id) || cache.get(id);
+const historyOf = (status) =>
+  [...state.history.values()].filter((e) => e.status === status)
+    .sort((a, b) => millis(b.updatedAt) - millis(a.updatedAt));
+const currentPrefs = () => normalizePrefs(state.user ? state.profile?.prefs : null);
 
 async function resolveActivity(id) {
   const known = findActivity(id);
@@ -113,27 +77,32 @@ async function resolveActivity(id) {
   }
 }
 
+// Punto único tras cualquier cambio de datos.
+function onDataChange() {
+  ensureStar();
+  refreshCardStates();
+  renderHeader();
+  renderActiveView();
+}
+
 /* ==========================================================
-   Tema
+   Tema (por defecto oscuro OLED)
    ========================================================== */
 const themeMeta = $('meta[name="theme-color"]');
 const darkQuery = matchMedia("(prefers-color-scheme: dark)");
 
 function themePreference() {
   try {
-    return localStorage.getItem("tux-theme") || "system";
+    return localStorage.getItem("tux-theme") || "dark";
   } catch {
-    return "system";
+    return "dark";
   }
 }
 
 function applyTheme(pref) {
   if (pref === "light" || pref === "dark") document.documentElement.dataset.theme = pref;
   else delete document.documentElement.dataset.theme;
-  try {
-    if (pref === "system") localStorage.removeItem("tux-theme");
-    else localStorage.setItem("tux-theme", pref);
-  } catch {}
+  try { localStorage.setItem("tux-theme", pref); } catch {}
   syncThemeUI();
 }
 
@@ -141,66 +110,29 @@ function syncThemeUI() {
   const pref = themePreference();
   const dark = pref === "dark" || (pref === "system" && darkQuery.matches);
   themeMeta.setAttribute("content", dark ? "#0D0D0E" : "#FFFFFF");
-  const options = $$("#theme-switch [data-theme-option]");
-  options.forEach((btn, i) => {
+  const group = $("#theme-switch");
+  if (!group) return;
+  $$("[data-theme-option]", group).forEach((btn, i) => {
     const active = btn.dataset.themeOption === pref;
     btn.classList.toggle("is-active", active);
     btn.setAttribute("aria-checked", String(active));
-    if (active) setThumb($("#theme-switch"), i);
+    if (active) setThumb(group, i);
   });
 }
-
 darkQuery.addEventListener("change", syncThemeUI);
-$("#theme-switch").addEventListener("click", (e) => {
-  const btn = e.target.closest("[data-theme-option]");
-  if (btn) applyTheme(btn.dataset.themeOption);
-});
-
-function setThumb(segmented, index) {
-  $(".segmented-thumb", segmented)?.style.setProperty("--index", index);
-}
-
-/* ==========================================================
-   Modales (dialog nativo con animación de salida)
-   ========================================================== */
-function openModal(dialog) {
-  if (dialog.open) return;
-  dialog.classList.remove("is-closing");
-  dialog.showModal();
-  dialog.focus({ preventScroll: true });
-}
-
-function closeModal(dialog) {
-  if (!dialog.open || dialog.classList.contains("is-closing")) return;
-  dialog.classList.add("is-closing");
-  setTimeout(() => {
-    dialog.classList.remove("is-closing");
-    dialog.close();
-  }, 260);
-}
-
-$$("dialog.sheet").forEach((dialog) => {
-  dialog.addEventListener("cancel", (e) => {
-    e.preventDefault();
-    closeModal(dialog);
-  });
-  // Clic en el fondo (fuera del rectángulo del diálogo) cierra.
-  dialog.addEventListener("click", (e) => {
-    if (e.target.closest("[data-close]")) return closeModal(dialog);
-    if (e.target !== dialog) return;
-    const r = dialog.getBoundingClientRect();
-    const inside = e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
-    if (!inside) closeModal(dialog);
-  });
-});
 
 /* ==========================================================
    Autenticación
    ========================================================== */
+initModals();
 const authModal = $("#auth-modal");
 const authForm = $("#auth-form");
 const authError = $("#auth-error");
 let authMode = "login";
+
+const AUTH_DEFAULT_SUBTITLE = "Planes sencillos, cerca de ti.";
+const AUTH_PROMPT = "Crea una cuenta o inicia sesión para interactuar en Tux";
+let afterAuth = null;
 
 function setAuthMode(mode) {
   authMode = mode;
@@ -218,10 +150,6 @@ function setAuthMode(mode) {
   authError.textContent = "";
   authError.classList.remove("is-ok");
 }
-
-const AUTH_DEFAULT_SUBTITLE = "Planes sencillos, cerca de ti.";
-const AUTH_PROMPT = "Crea una cuenta o inicia sesión para interactuar en Tux";
-let afterAuth = null; // acción pendiente tras iniciar sesión (abrir perfil, publicar…)
 
 function openAuth(mode = "login", message = AUTH_DEFAULT_SUBTITLE) {
   setAuthMode(mode);
@@ -318,20 +246,23 @@ $("#reset-btn").addEventListener("click", async () => {
 watchSession((user) => {
   sessionUnsubs.forEach((unsub) => unsub());
   sessionUnsubs = [];
-  state.user = user;
-  state.profile = null;
-  state.liked = new Set();
-  state.saved = [];
-  state.completed = [];
-  state.myPlans = [];
-  $("#settings-account").hidden = !user;
+  Object.assign(state, {
+    user, profile: null, profileLoaded: false, history: new Map(), historyLoaded: false, guestStar: null,
+    liked: new Set(), saved: [], myPlans: []
+  });
 
   if (user) {
     ensureUserProfile(user).catch((err) => console.warn("Tux: perfil no creado.", err));
     sessionUnsubs.push(
       watchUserProfile(user.uid, (profile) => {
         state.profile = profile;
-        if (state.view === "profile") renderProfile();
+        state.profileLoaded = true;
+        onDataChange();
+      }),
+      watchHistory(user.uid, (map) => {
+        state.history = map;
+        state.historyLoaded = true;
+        onDataChange();
       }),
       watchLikes(user.uid, (ids) => {
         state.liked = new Set(ids);
@@ -339,38 +270,47 @@ watchSession((user) => {
       }),
       watchSaved(user.uid, (ids) => {
         state.saved = ids;
-        refreshCardStates();
-        if (state.view === "profile") renderProfile();
-      }),
-      watchCompleted(user.uid, (ids) => {
-        state.completed = ids;
-        refreshCardStates();
-        if (state.view === "profile") renderProfile();
+        onDataChange();
       })
     );
     loadMyPlans();
+  } else if (state.view === "plans") {
+    setView("dashboard");
   }
-  refreshCardStates();
   renderFeed(true);
-  if (state.view === "profile") renderProfile();
+  onDataChange();
 });
 
 /* ==========================================================
-   Tarjetas
+   Piezas visuales de actividades
    ========================================================== */
 function placeholder(a) {
   return h("div", { class: "placeholder", dataset: { cat: a.category || "chill" } },
     h("span", { class: "ph-emoji", text: a.emoji || CATEGORIES[a.category]?.emoji || "🐧" }),
-    svgUse("tux", "ph-tux")
+    tuxLogo("ph-tux")
   );
 }
 
-function mediaImage(url) {
+// Imagen con fundido; si es equirectangular (2:1) avisa para ofrecer el visor 360°.
+function mediaImage(url, { cls = "", onPanorama } = {}) {
   if (!url || !isValidImageUrl(url)) return null;
-  const img = h("img", { src: url, alt: "", loading: "lazy", decoding: "async", referrerpolicy: "no-referrer" });
-  img.addEventListener("load", () => img.classList.add("is-loaded"));
+  const img = h("img", { class: cls, src: url, alt: "", loading: "lazy", decoding: "async", referrerpolicy: "no-referrer" });
+  img.addEventListener("load", () => {
+    img.classList.add("is-loaded");
+    if (onPanorama && isEquirectangular(img.naturalWidth, img.naturalHeight)) onPanorama(img);
+  });
   img.addEventListener("error", () => img.remove());
   return img;
+}
+
+function panoramaButton(url, title) {
+  return h("button", {
+    class: "btn-360", type: "button", "aria-label": "Ver en 360°",
+    onclick: (e) => {
+      e.stopPropagation();
+      openViewer({ url, type: "image", is360: true, title, sub: "Imagen 360° del plan" });
+    }
+  }, svgUse("i-orbit"), "Ver en 360°");
 }
 
 function budgetMeta(budget) {
@@ -391,8 +331,23 @@ function effortMeta(effort) {
   return h("span", { class: "meta", title: `Esfuerzo ${info.short.toLowerCase()}` }, bars, info.short);
 }
 
-function railButton(action, iconId, label, extraClass = "") {
-  return h("button", { class: `rail-btn ${extraClass}`, type: "button", dataset: { action }, "aria-label": label },
+function metaRow(a, cls) {
+  const when = WHEN[a.when];
+  return h("div", { class: cls },
+    budgetMeta(a.budget),
+    effortMeta(a.effort),
+    when && h("span", { class: "meta" }, `${when.emoji} ${when.label}`),
+    a.duration && h("span", { class: "meta" }, svgUse("i-clock"), a.duration)
+  );
+}
+
+function categoryBadge(a) {
+  const cat = CATEGORIES[a.category] || CATEGORIES.chill;
+  return h("span", { class: "badge-cat" }, `${cat.emoji} ${cat.label}`);
+}
+
+function railButton(action, iconId, label) {
+  return h("button", { class: "rail-btn", type: "button", dataset: { action }, "aria-label": label },
     h("span", { class: "rail-icon" }, svgUse(iconId)),
     h("span", { class: "rail-count", text: label })
   );
@@ -400,25 +355,22 @@ function railButton(action, iconId, label, extraClass = "") {
 
 function buildCard(a) {
   const own = state.user && a.authorId === state.user.uid && !a.sample;
-  const cat = CATEGORIES[a.category] || CATEGORIES.chill;
-  const when = WHEN[a.when];
+  const card = h("article", { class: "card", dataset: { id: a.id }, "aria-label": a.title });
+  const media = h("div", { class: "card-media" }, placeholder(a));
+  const img = mediaImage(a.imageUrl, { onPanorama: () => card.append(panoramaButton(a.imageUrl, a.title)) });
+  if (img) media.append(img);
 
-  return h("article", { class: "card", dataset: { id: a.id }, "aria-label": a.title },
-    h("div", { class: "card-media" }, placeholder(a), mediaImage(a.imageUrl)),
+  card.append(
+    media,
     h("div", { class: "card-scrim" }),
     h("div", { class: "card-info" },
       h("div", { class: "card-badges" },
-        h("span", { class: "badge-cat" }, `${cat.emoji} ${cat.label}`),
+        categoryBadge(a),
         a.sample && h("span", { class: "badge-sample", text: "Ejemplo" })
       ),
       h("h2", { class: "card-title", text: a.title }),
       a.description && h("p", { class: "card-desc", text: a.description }),
-      h("div", { class: "card-meta" },
-        budgetMeta(a.budget),
-        effortMeta(a.effort),
-        when && h("span", { class: "meta" }, `${when.emoji} ${when.label}`),
-        a.duration && h("span", { class: "meta" }, svgUse("i-clock"), a.duration)
-      ),
+      metaRow(a, "card-meta"),
       h("p", { class: "card-author" }, "por ", h("b", { text: `@${a.authorName || "tux"}` }),
         a.createdAt ? ` · ${timeAgo(a.createdAt)}` : "")
     ),
@@ -431,12 +383,11 @@ function buildCard(a) {
       own && railButton("delete", "i-trash", "Borrar")
     )
   );
+  return card;
 }
 
-// Sincroniza estado (activo/contadores) de todas las tarjetas visibles.
 function refreshCardStates() {
   const saved = new Set(state.saved);
-  const completed = new Set(state.completed);
   $$(".card[data-id]").forEach((card) => {
     const id = card.dataset.id;
     const a = findActivity(id);
@@ -449,22 +400,18 @@ function refreshCardStates() {
     const save = $('[data-action="save"]', card);
     save.classList.toggle("is-on", saved.has(id));
     $(".rail-count", save).textContent = saved.has(id) ? "Guardado" : "Guardar";
-    $('[data-action="done"]', card).classList.toggle("is-on", completed.has(id));
+    $('[data-action="done"]', card).classList.toggle("is-on", state.history.get(id)?.status === "completed");
   });
 }
 
 /* ==========================================================
-   Feed
+   Feed de exploración
    ========================================================== */
 const feed = $("#feed");
 
-function filteredActivities() {
-  return feedSource().filter((a) => matchesFilters(a, state.filters));
-}
-
-function emptyState() {
+function emptyFeedState() {
   return h("div", { class: "empty" },
-    svgUse("tux", "empty-mark"),
+    tuxLogo("empty-mark"),
     h("h3", { text: "No hay planes con estos filtros" }),
     h("p", { text: "Tux sugiere crear uno. Seguro que a alguien más le apetece lo mismo." }),
     h("div", { class: "empty-actions" },
@@ -476,44 +423,41 @@ function emptyState() {
 
 function renderFeed(force = false) {
   if (!state.feedReady) return;
-  const list = filteredActivities();
+  const list = feedSource().filter((a) => matchesFilters(a, state.filters));
   const key = list.map((a) => a.id).join("|");
   updateFilterSummary(list.length);
-
   if (key === state.feedKey && !force) return refreshCardStates();
 
-  // Conserva la tarjeta visible al reconstruir.
   const index = feed.clientHeight ? Math.round(feed.scrollTop / feed.clientHeight) : 0;
   const currentId = feed.children[index]?.dataset?.id;
-
-  feed.replaceChildren(...(list.length ? list.map(buildCard) : [emptyState()]));
+  feed.replaceChildren(...(list.length ? list.map(buildCard) : [emptyFeedState()]));
   state.feedKey = key;
   refreshCardStates();
-
   const keepIndex = list.findIndex((a) => a.id === currentId);
   feed.scrollTop = keepIndex > 0 ? keepIndex * feed.clientHeight : 0;
 }
 
-watchActivities(
-  (list) => {
-    state.remote = list;
-    state.feedReady = true;
-    renderFeed();
-  },
-  (err) => {
-    console.warn("Tux: no se pudo leer Firestore, usando planes de ejemplo.", err);
-    state.remote = [];
-    state.feedReady = true;
-    renderFeed(true);
-  }
-);
-
-// Si Firestore tarda (red lenta, base aún sin crear), muestra los ejemplos mientras tanto.
-setTimeout(() => {
-  if (state.feedReady) return;
+function feedLoaded(list) {
+  state.remote = list;
   state.feedReady = true;
-  renderFeed(true);
+  renderFeed();
+  onDataChange();
+}
+
+watchActivities(feedLoaded, (err) => {
+  console.warn("Tux: no se pudo leer Firestore, usando planes de ejemplo.", err);
+  feedLoaded([]);
+});
+
+// Si Firestore tarda (red lenta), arranca con los ejemplos.
+setTimeout(() => {
+  if (!state.feedReady) feedLoaded([]);
 }, 3500);
+
+function openFeed() {
+  setView("feed");
+}
+$("#feed-back").addEventListener("click", () => setView("dashboard"));
 
 /* ---------- Acciones de tarjeta ---------- */
 async function toggleLike(id, card) {
@@ -521,7 +465,6 @@ async function toggleLike(id, card) {
   if (a?.sample) return toast("Es un plan de ejemplo · publica el tuyo 🐧");
   if (!requireAuth()) return;
   const liked = !state.liked.has(id);
-  // Actualización optimista; el snapshot de Firestore confirma después.
   if (a) a.likeCount = Math.max(0, (a.likeCount || 0) + (liked ? 1 : -1));
   liked ? state.liked.add(id) : state.liked.delete(id);
   refreshCardStates();
@@ -537,19 +480,18 @@ async function toggleLike(id, card) {
   }
 }
 
-async function toggleRelation(kind, id, card) {
+async function toggleSaved(id, card) {
   if (!requireAuth()) return;
-  const listKey = kind === "save" ? "saved" : "completed";
-  const on = !state[listKey].includes(id);
-  state[listKey] = on ? [id, ...state[listKey]] : state[listKey].filter((x) => x !== id);
+  const on = !state.saved.includes(id);
+  state.saved = on ? [id, ...state.saved] : state.saved.filter((x) => x !== id);
   refreshCardStates();
-  pop(card, kind);
+  if (card) pop(card, "save");
   try {
-    await (kind === "save" ? setSaved : setCompleted)(state.user.uid, id, on);
-    if (on) toast(kind === "save" ? "Guardado en tu perfil" : "¡Bien hecho! Tux está orgulloso 🐧");
+    await setSaved(state.user.uid, id, on);
+    toast(on ? "Guardado en Mis planes" : "Quitado de guardados");
   } catch (err) {
     console.error(err);
-    state[listKey] = on ? state[listKey].filter((x) => x !== id) : [id, ...state[listKey]];
+    state.saved = on ? state.saved.filter((x) => x !== id) : [id, ...state.saved];
     refreshCardStates();
     toast("No se pudo actualizar.");
   }
@@ -589,7 +531,7 @@ function pop(card, action) {
   btn.classList.add("is-popping");
 }
 
-document.addEventListener("click", async (e) => {
+document.addEventListener("click", (e) => {
   const btn = e.target.closest(".rail-btn");
   if (!btn) return;
   const card = btn.closest(".card");
@@ -598,8 +540,10 @@ document.addEventListener("click", async (e) => {
   switch (btn.dataset.action) {
     case "like": return toggleLike(id, card);
     case "comment": return a?.sample ? toast("Los planes de ejemplo no tienen comentarios") : openComments(id);
-    case "save": return toggleRelation("save", id, card);
-    case "done": return toggleRelation("done", id, card);
+    case "save": return toggleSaved(id, card);
+    case "done":
+      if (state.history.get(id)?.status === "completed") return toast("Ya completaste este plan ✓");
+      return a && openComplete(a);
     case "share": return a && sharePlan(a);
     case "delete": return a && removePlan(a);
   }
@@ -640,14 +584,14 @@ const FILTER_OPTIONS = {
   when: Object.entries(WHEN).map(([value, w]) => ({ value, label: `${w.emoji} ${w.label}` }))
 };
 
-function chip({ value, label, hint }) {
-  return h("button", { class: "chip", type: "button", dataset: { value }, "aria-pressed": "false" },
+function chip({ value, label, hint }, active = false) {
+  return h("button", { class: `chip${active ? " is-active" : ""}`, type: "button", dataset: { value }, "aria-pressed": String(active) },
     label, hint && h("small", { text: hint }));
 }
 
 for (const [group, options] of Object.entries(FILTER_OPTIONS)) {
   const container = $(`[data-filter="${group}"]`, filtersModal);
-  container.append(...options.map(chip));
+  container.append(...options.map((o) => chip(o)));
   container.addEventListener("click", (e) => {
     const btn = e.target.closest(".chip");
     if (!btn) return;
@@ -685,13 +629,7 @@ function clearFilters() {
   onFiltersChange();
 }
 
-function activeFilterCount() {
-  const f = state.filters;
-  return f.budget.size + f.effort.size + f.category.size + f.when.size + (f.search ? 1 : 0);
-}
-
 function renderActiveFilters() {
-  const row = $("#active-filters");
   const chips = [];
   for (const [group, options] of Object.entries(FILTER_OPTIONS)) {
     for (const opt of options) {
@@ -708,10 +646,10 @@ function renderActiveFilters() {
       onclick: () => { searchInput.value = ""; state.filters.search = ""; onFiltersChange(); }
     }, `“${searchInput.value.trim()}”`, svgUse("i-x")));
   }
-  row.replaceChildren(...chips);
-
+  $("#active-filters").replaceChildren(...chips);
+  const f = state.filters;
+  const count = f.budget.size + f.effort.size + f.category.size + f.when.size + (f.search ? 1 : 0);
   const badge = $("#filters-badge");
-  const count = activeFilterCount();
   badge.hidden = count === 0;
   badge.textContent = count;
 }
@@ -729,16 +667,28 @@ $("#search-btn").addEventListener("click", () => {
 $("#filters-clear").addEventListener("click", clearFilters);
 
 /* ==========================================================
-   Navegación entre vistas
+   Navegación
    ========================================================== */
+const VIEWS = ["dashboard", "plans", "vr", "settings", "feed"];
+
 function setView(view) {
+  if (!VIEWS.includes(view)) return;
+  const changed = state.view !== view;
   state.view = view;
   $("#app").dataset.view = view;
   $$(".view").forEach((v) => v.classList.toggle("is-active", v.id === `view-${view}`));
   $$(".tab-item").forEach((t) => t.classList.toggle("is-active", t.dataset.nav === view));
-  if (view === "profile") {
-    renderProfile();
-    loadMyPlans();
+  if (view === "feed") {
+    renderFeed();
+    return;
+  }
+  delete renderSig[view];
+  renderActiveView();
+  const page = $(`#view-${view} .page`);
+  if (changed && page) {
+    page.parentElement.scrollTop = 0;
+    page.classList.add("is-entering");
+    setTimeout(() => page.classList.remove("is-entering"), 700);
   }
 }
 
@@ -746,20 +696,78 @@ $(".tabbar").addEventListener("click", (e) => {
   const item = e.target.closest("[data-nav]");
   if (!item) return;
   const target = item.dataset.nav;
-  if (target === "create") return openCreate();
-  if (target === "profile" && !requireAuth(() => setView("profile"))) return;
-  if (target === "feed" && state.view === "feed") return feed.scrollTo({ top: 0, behavior: "smooth" });
+  if (target === "plans" && !requireAuth(() => setView("plans"))) return;
+  if (target === state.view) {
+    $(`#view-${target}`)?.scrollTo({ top: 0, behavior: "smooth" });
+    return;
+  }
   setView(target);
 });
 
+// Renderiza la vista activa solo si cambió algo relevante (evita parpadeos en tiempo real).
+function renderActiveView() {
+  const renderers = { dashboard: renderDashboard, plans: renderPlans, vr: renderVr, settings: renderSettings };
+  renderers[state.view]?.();
+}
+
+function memo(view, sig) {
+  if (renderSig[view] === sig) return false;
+  renderSig[view] = sig;
+  return true;
+}
+
 /* ==========================================================
-   Perfil
+   Cabecera y perfil
    ========================================================== */
-const PROFILE_TABS = [
-  { id: "mine", label: "Mis planes", empty: "Aún no has publicado planes.\nComparte tu primer TuxPlan con el botón +." },
-  { id: "saved", label: "Guardados", empty: "Guarda planes desde el feed\npara tenerlos a mano." },
-  { id: "completed", label: "Cumplidos", empty: "Marca «Lo hice» en un plan\ny aparecerá aquí." }
-];
+function avatarElement(profile, { interactive = false } = {}) {
+  const color = AVATAR_COLORS.includes(profile?.avatarColor) ? profile.avatarColor : "orange";
+  const content = profile?.photoURL
+    ? h("img", { src: profile.photoURL, alt: "", referrerpolicy: "no-referrer" })
+    : tuxLogo("avatar-tux");
+  return h(interactive ? "button" : "div", {
+    class: "avatar", type: interactive ? "button" : null, dataset: { color },
+    "aria-label": interactive ? "Toca para cambiar el color de tu avatar" : null,
+    onclick: interactive ? onAvatarTap : null
+  }, content);
+}
+
+function renderHeader() {
+  const btn = $("#header-avatar");
+  const sig = state.user ? `${state.profile?.photoURL}|${state.profile?.avatarColor}` : "guest";
+  if (btn.dataset.sig === sig) return;
+  btn.dataset.sig = sig;
+  if (!state.user) {
+    btn.className = "header-avatar";
+    btn.replaceChildren(svgUse("i-user"));
+    btn.setAttribute("aria-label", "Iniciar sesión");
+    return;
+  }
+  const av = avatarElement(state.profile);
+  btn.className = "header-avatar avatar";
+  btn.dataset.color = av.dataset.color;
+  btn.replaceChildren(...av.childNodes);
+  btn.setAttribute("aria-label", "Tu perfil");
+}
+
+$("#header-avatar").addEventListener("click", () => {
+  if (!requireAuth(openProfile)) return;
+  openProfile();
+});
+
+let avatarTimer;
+function onAvatarTap(e) {
+  const avatar = e.currentTarget;
+  avatar.classList.remove("is-waving");
+  void avatar.offsetWidth;
+  avatar.classList.add("is-waving");
+  if (!state.profile || state.profile.photoURL) return;
+  const next = AVATAR_COLORS[(AVATAR_COLORS.indexOf(avatar.dataset.color) + 1) % AVATAR_COLORS.length];
+  avatar.dataset.color = next;
+  clearTimeout(avatarTimer);
+  avatarTimer = setTimeout(() => {
+    updateUserProfile(state.user.uid, { avatarColor: avatar.dataset.color }).catch(() => toast("No se pudo guardar el color."));
+  }, 600);
+}
 
 async function loadMyPlans() {
   if (!state.user) return;
@@ -769,122 +777,600 @@ async function loadMyPlans() {
   } catch (err) {
     console.warn("Tux: no se pudieron cargar tus planes.", err);
   }
-  if (state.view === "profile") renderProfile();
+  if ($("#profile-modal").open) renderProfile();
 }
 
-function avatarElement(profile, interactive) {
-  const color = AVATAR_COLORS.includes(profile?.avatarColor) ? profile.avatarColor : "orange";
-  const content = profile?.photoURL
-    ? h("img", { src: profile.photoURL, alt: "", referrerpolicy: "no-referrer" })
-    : svgUse("tux", "avatar-tux");
-  return h(interactive ? "button" : "div", {
-    class: "avatar", type: interactive ? "button" : null, dataset: { color },
-    "aria-label": interactive ? "Toca a Tux para cambiar su color" : null,
-    title: interactive ? "Toca a Tux" : null,
-    onclick: interactive ? onAvatarTap : null
-  }, content);
+const profileModal = $("#profile-modal");
+
+function openProfile() {
+  renderProfile();
+  openModal(profileModal);
+  loadMyPlans();
 }
 
-let avatarTimer;
-function onAvatarTap(e) {
-  const avatar = e.currentTarget;
-  avatar.classList.remove("is-waving");
-  void avatar.offsetWidth;
-  avatar.classList.add("is-waving");
-  if (!state.profile || state.profile.photoURL) return;
-  const next = AVATAR_COLORS[(AVATAR_COLORS.indexOf(state.profile.avatarColor) + 1) % AVATAR_COLORS.length];
-  avatar.dataset.color = next;
-  // Agrupa toques rápidos en una sola escritura.
-  clearTimeout(avatarTimer);
-  avatarTimer = setTimeout(() => {
-    updateUserProfile(state.user.uid, { avatarColor: avatar.dataset.color }).catch(() => toast("No se pudo guardar el color."));
-  }, 600);
-  state.profile = { ...state.profile, avatarColor: next };
-}
-
-function settingsButton() {
-  return h("button", { class: "icon-btn", type: "button", "aria-label": "Ajustes", onclick: openSettings },
-    svgUse("i-gear", "icon icon-gear"));
-}
+const stat = (value, label) => h("div", { class: "stat" }, h("b", { text: value }), h("span", { text: label }));
 
 function renderProfile() {
-  const root = $("#profile");
-  if (!state.user) {
-    root.replaceChildren(
-      h("div", { class: "profile-top" }, settingsButton()),
-      h("div", { class: "profile-guest" },
-        svgUse("tux", "empty-mark"),
-        h("h2", { text: "Tu rincón en Tux" }),
-        h("p", { text: "Guarda planes, apúntate a los que te gusten y comparte los tuyos." }),
-        h("button", { class: "primary-btn", type: "button", onclick: () => openAuth("signup") }, "Crear cuenta"),
-        h("button", { class: "link-btn", type: "button", onclick: () => openAuth("login") }, "Ya tengo cuenta")
-      )
-    );
-    return;
-  }
-
+  const root = $("#profile-content");
+  if (!state.user) return root.replaceChildren();
   const p = state.profile || {};
   const since = millis(p.createdAt)
     ? new Date(millis(p.createdAt)).toLocaleDateString("es", { month: "long", year: "numeric" })
     : null;
-  const tabIndex = PROFILE_TABS.findIndex((t) => t.id === state.profileTab);
-  const counts = { mine: state.myPlans.length, saved: state.saved.length, completed: state.completed.length };
-
-  const tabs = h("div", { class: "segmented three", role: "tablist" },
-    PROFILE_TABS.map((t) => h("button", {
-      type: "button", role: "tab", class: t.id === state.profileTab ? "is-active" : "",
-      "aria-selected": String(t.id === state.profileTab),
-      onclick: () => { state.profileTab = t.id; renderProfile(); }
-    }, t.label)),
-    h("span", { class: "segmented-thumb" })
-  );
-  setThumb(tabs, tabIndex);
-
   const grid = h("div", { class: "tile-grid" });
-
   root.replaceChildren(
-    h("div", { class: "profile-top" }, settingsButton()),
     h("div", { class: "profile-head" },
-      avatarElement(p, true),
+      avatarElement(p, { interactive: true }),
       h("h1", { class: "profile-name", text: p.nickname || state.user.displayName || "Pingüino" }),
       p.bio && h("p", { class: "profile-bio", text: p.bio }),
       since && h("p", { class: "profile-since", text: `En Tux desde ${since}` }),
       h("button", { class: "profile-edit", type: "button", onclick: openEditProfile }, "Editar perfil")
     ),
     h("div", { class: "stats" },
-      h("div", { class: "stat" }, h("b", { text: counts.mine }), h("span", { text: "Planes" })),
-      h("div", { class: "stat" }, h("b", { text: counts.saved }), h("span", { text: "Guardados" })),
-      h("div", { class: "stat" }, h("b", { text: counts.completed }), h("span", { text: "Cumplidos" }))
+      stat(historyOf("completed").length, "Completados"),
+      stat(state.myPlans.length, "Publicados"),
+      stat(state.saved.length, "Guardados")
     ),
-    tabs,
+    h("h2", { class: "section-title", text: "Tus publicaciones" }),
     grid
   );
-
-  renderTiles(grid, state.profileTab);
+  if (!state.myPlans.length) {
+    grid.append(h("p", { class: "tile-empty", text: "Aún no has publicado planes. Comparte el primero desde el Panel." }));
+  } else {
+    grid.append(...state.myPlans.map((a) =>
+      h("button", { class: "tile", type: "button", "aria-label": a.title, onclick: () => openPlan(a.id) },
+        placeholder(a), mediaImage(a.imageUrl) || "", h("span", { class: "tile-title", text: a.title }))));
+  }
 }
 
-async function renderTiles(grid, tab) {
-  const ids = tab === "mine" ? state.myPlans.map((a) => a.id) : tab === "saved" ? state.saved : state.completed;
-  const activities = (await Promise.all(ids.map(resolveActivity))).filter(Boolean);
-  if (!grid.isConnected || state.profileTab !== tab) return;
-  if (!activities.length) {
-    const msg = PROFILE_TABS.find((t) => t.id === tab).empty;
-    grid.replaceChildren(h("p", { class: "tile-empty", text: msg, style: "white-space: pre-line" }));
+/* ==========================================================
+   Motor de la actividad estrella
+   ========================================================== */
+const sameStar = (a, b) =>
+  (!a && !b) || Boolean(a && b && a.activityId === b.activityId && a.period === b.period && a.frequencyDays === b.frequencyDays);
+
+function ensureStar() {
+  if (!state.feedReady) return;
+  if (state.user && (!state.profileLoaded || !state.historyLoaded)) return;
+  const prefs = currentPrefs();
+  const freq = prefs.frequencyDays;
+  const period = currentPeriod(freq);
+  const star = (state.user && state.profile?.star) || state.guestStar;
+  const status = star && state.history.get(star.activityId)?.status;
+  const valid = star && star.period === period && star.frequencyDays === freq
+    && status !== "discarded" && findActivity(star.activityId);
+  if (valid) return;
+
+  const pick = pickStar(feedSource(), { prefs, history: state.history, seed: `${state.user?.uid || "guest"}:${period}` });
+  const next = pick ? { activityId: pick.activity.id, period, frequencyDays: freq } : null;
+  if (sameStar(star, next)) return;
+  if (state.user && state.profile) {
+    state.profile = { ...state.profile, star: next };
+    saveStar(state.user.uid, next).catch((err) => console.warn("Tux: no se pudo guardar la estrella.", err));
+  } else {
+    state.guestStar = next;
+  }
+}
+
+function currentStar() {
+  const star = (state.user && state.profile?.star) || state.guestStar;
+  const activity = star && findActivity(star.activityId);
+  if (!activity) return null;
+  const entry = state.history.get(activity.id);
+  return { activity, status: entry?.status || "pending", entry };
+}
+
+/* ==========================================================
+   Vista: Panel
+   ========================================================== */
+function greeting() {
+  const hour = new Date().getHours();
+  if (hour < 6) return "Buenas noches";
+  if (hour < 13) return "Buenos días";
+  if (hour < 20) return "Buenas tardes";
+  return "Buenas noches";
+}
+
+function starLabel(freq) {
+  if (freq === 1) return "Actividad del día";
+  if (freq === 7) return "Actividad de la semana";
+  return `Actividad estrella · ${freq} días`;
+}
+
+function renderDashboard() {
+  const prefs = currentPrefs();
+  const star = currentStar();
+  const sig = JSON.stringify([
+    state.feedReady, state.user?.uid, state.profile?.nickname, prefs, star?.activity.id, star?.status,
+    star?.entry?.proofUrl, star?.activity.title, historyOf("accepted").length, historyOf("completed").length,
+    historyOf("discarded").length, feedSource().length
+  ]);
+  if (!memo("dashboard", sig)) return;
+
+  const name = state.user ? (state.profile?.nickname || state.user.displayName || "") : "";
+  const date = new Date().toLocaleDateString("es", { weekday: "long", day: "numeric", month: "long" });
+
+  $("#dashboard").replaceChildren(
+    h("header", { class: "page-head" },
+      h("p", { class: "eyebrow", text: date }),
+      h("h1", { class: "page-title", text: name ? `${greeting()}, ${name}` : greeting() })
+    ),
+    state.feedReady
+      ? starCard(star, prefs)
+      : h("div", { class: "star star-empty" }, tuxLogo("empty-mark loading-mark")),
+    h("div", { class: "quick" },
+      h("button", { class: "quick-tile", type: "button", onclick: openFeed },
+        h("span", { class: "quick-icon" }, svgUse("i-compass")),
+        h("span", {}, h("b", { text: "Explorar planes" }), h("small", { text: `${feedSource().length} ideas en el feed` }))
+      ),
+      h("button", { class: "quick-tile", type: "button", onclick: openCreate },
+        h("span", { class: "quick-icon" }, svgUse("i-plus")),
+        h("span", {}, h("b", { text: "Publicar TuxPlan" }), h("small", { text: "Comparte tu idea" }))
+      )
+    ),
+    h("div", { class: "mini-stats" },
+      stat(historyOf("accepted").length, "En curso"),
+      stat(historyOf("completed").length, "Completados"),
+      stat(historyOf("discarded").length, "En papelera")
+    )
+  );
+}
+
+function starCard(star, prefs) {
+  if (!star) {
+    return h("section", { class: "star star-empty" },
+      tuxLogo("empty-mark"),
+      h("h3", { text: "Has explorado todos los planes" }),
+      h("p", { text: "Publica uno nuevo o restaura alguno de la papelera para que Tux vuelva a sugerirlo." }),
+      h("button", { class: "primary-btn", type: "button", onclick: openCreate }, "Publicar TuxPlan")
+    );
+  }
+  const { activity: a, status, entry } = star;
+  const media = h("div", { class: "star-media" },
+    placeholder(a),
+    h("span", { class: "star-pill" }, svgUse("i-star"), starLabel(prefs.frequencyDays)),
+    h("div", { class: "star-overlay" },
+      h("div", { class: "card-badges" }, categoryBadge(a), a.sample && h("span", { class: "badge-sample", text: "Ejemplo" })),
+      h("h2", { class: "star-title", text: a.title })
+    )
+  );
+  const img = mediaImage(a.imageUrl, { cls: "cover", onPanorama: () => media.append(panoramaButton(a.imageUrl, a.title)) });
+  if (img) media.prepend(img);
+
+  const body = h("div", { class: "star-body" });
+  if (a.description) body.append(h("p", { class: "star-desc", text: a.description }));
+  body.append(metaRow(a, "star-meta"));
+
+  if (status === "pending") {
+    const { reasons } = scoreActivity(a, prefs);
+    body.append(
+      h("div", { class: "star-reasons" },
+        (reasons.length ? reasons : ["Elegida por Tux para ti"]).map((r) => h("span", { class: "reason-chip", text: r }))),
+      h("div", { class: "star-actions" },
+        h("button", { class: "primary-btn", type: "button", onclick: () => acceptPlan(a) }, "Aceptar plan"),
+        h("button", { class: "ghost-btn", type: "button", onclick: () => openDiscard(a) }, "Descartar")
+      )
+    );
+  } else if (status === "accepted") {
+    body.append(
+      h("p", { class: "star-status" }, h("span", { class: "status-dot" }), "Aceptado · ciérralo con una prueba"),
+      h("div", { class: "star-actions" },
+        h("button", { class: "primary-btn", type: "button", onclick: () => openComplete(a) }, "Completar con prueba"),
+        h("button", { class: "ghost-btn", type: "button", onclick: () => openDiscard(a) }, "Descartar")
+      )
+    );
+  } else if (status === "completed") {
+    body.append(h("p", { class: "star-status" }, h("span", { class: "status-dot done" }), "Completado · ¡bien hecho!"));
+    if (entry?.proofUrl) body.append(proofThumb(entry, a.title));
+  }
+  body.append(h("p", { class: "star-foot" }, svgUse("i-clock"),
+    h("span", { id: "star-countdown", text: countdownText(prefs.frequencyDays) })));
+
+  return h("section", { class: "star", "aria-label": "Actividad estrella" }, media, body);
+}
+
+function countdownText(freq) {
+  return `Nueva actividad estrella en ${formatCountdown(msUntilNextPeriod(freq))}`;
+}
+
+// Actualiza la cuenta atrás y detecta el cambio de periodo.
+let lastPeriodKey = null;
+setInterval(() => {
+  const freq = currentPrefs().frequencyDays;
+  const el = $("#star-countdown");
+  if (el) el.textContent = countdownText(freq);
+  const key = `${freq}:${currentPeriod(freq)}`;
+  if (lastPeriodKey && key !== lastPeriodKey) onDataChange();
+  lastPeriodKey = key;
+}, 30000);
+
+function proofThumb(entry, title) {
+  return h("button", {
+    class: "proof-thumb", type: "button", "aria-label": "Ver prueba",
+    onclick: () => openViewer({
+      url: entry.proofUrl, type: entry.proofType, is360: entry.is360, title, sub: "Tu prueba de actividad"
+    })
+  },
+    h("img", { src: cloudinaryThumb(entry.proofUrl, entry.proofType), alt: "", loading: "lazy" }),
+    entry.is360 && h("span", { class: "badge-360" }, svgUse("i-orbit"), "360°")
+  );
+}
+
+async function acceptPlan(a) {
+  if (!requireAuth()) return;
+  try {
+    await setHistory(state.user.uid, a, "accepted");
+    toast("Plan aceptado · lo tienes en Mis planes");
+  } catch (err) {
+    console.error(err);
+    toast("No se pudo aceptar el plan.");
+  }
+}
+
+/* ==========================================================
+   Vista: Mis planes
+   ========================================================== */
+const PLAN_TABS = [
+  { id: "accepted", label: "En curso", empty: "Acepta tu actividad estrella en el Panel y aparecerá aquí hasta que la completes." },
+  { id: "completed", label: "Completados", empty: "Completa un plan con una foto o vídeo y quedará guardado aquí." },
+  { id: "saved", label: "Guardados", empty: "Guarda planes desde el feed de exploración para tenerlos a mano." },
+  { id: "discarded", label: "Papelera", empty: "La papelera está vacía. Los planes descartados no se vuelven a sugerir hasta que los restaures." }
+];
+
+function renderPlans() {
+  const root = $("#plans");
+  if (!state.user) {
+    if (!memo("plans", "guest")) return;
+    root.replaceChildren(
+      h("header", { class: "page-head" }, h("h1", { class: "page-title", text: "Mis planes" })),
+      h("div", { class: "list-empty" }, tuxLogo("empty-mark"),
+        h("p", { text: "Inicia sesión para ver tus planes aceptados, completados y tu papelera." }),
+        h("button", { class: "primary-btn", type: "button", style: "margin-top:16px", onclick: () => requireAuth() }, "Iniciar sesión"))
+    );
     return;
   }
-  grid.replaceChildren(...activities.map((a, i) => {
-    const tile = h("button", { class: "tile", type: "button", "aria-label": a.title, onclick: () => openPlan(a.id) },
-      placeholder(a), mediaImage(a.imageUrl), h("span", { class: "tile-title", text: a.title }));
-    tile.style.animationDelay = `${Math.min(i, 12) * 30}ms`;
-    return tile;
-  }));
+  const tab = state.plansTab;
+  const entries = tab === "saved"
+    ? state.saved
+    : historyOf(tab).map((e) => [e.activityId, e.status, millis(e.updatedAt), e.proofUrl]);
+  if (!memo("plans", JSON.stringify([tab, entries, state.feedReady]))) return;
+
+  const tabs = h("div", { class: "segmented four plans-tabs", role: "tablist" },
+    PLAN_TABS.map((t) => h("button", {
+      type: "button", role: "tab", class: t.id === tab ? "is-active" : "", "aria-selected": String(t.id === tab),
+      onclick: () => { state.plansTab = t.id; renderPlans(); }
+    }, t.label)),
+    h("span", { class: "segmented-thumb" })
+  );
+  setThumb(tabs, PLAN_TABS.findIndex((t) => t.id === tab));
+  const list = h("ul", { class: "plan-list" });
+
+  root.replaceChildren(
+    h("header", { class: "page-head" },
+      h("h1", { class: "page-title", text: "Mis planes" }),
+      h("p", { class: "page-sub", text: "Tu historial con Tux: en curso, completados, guardados y papelera." })
+    ),
+    tabs,
+    list
+  );
+  fillPlanList(list, tab);
 }
 
-/* ---------- Detalle de plan ---------- */
+async function fillPlanList(list, tab) {
+  const emptyMsg = PLAN_TABS.find((t) => t.id === tab).empty;
+  let rows;
+  if (tab === "saved") {
+    const activities = (await Promise.all(state.saved.map(resolveActivity))).filter(Boolean);
+    rows = activities.map(savedRow);
+  } else {
+    rows = historyOf(tab).map((entry) => historyRow(entry, tab));
+  }
+  if (!list.isConnected || state.plansTab !== tab) return;
+  list.replaceChildren(...(rows.length
+    ? rows
+    : [h("li", { class: "list-empty" }, tuxLogo("empty-mark"), h("p", { text: emptyMsg }))]));
+}
+
+function planThumb(source, { proof } = {}) {
+  const thumb = h("span", { class: "plan-thumb" }, placeholder(source));
+  if (proof?.proofUrl) {
+    thumb.append(h("img", { src: cloudinaryThumb(proof.proofUrl, proof.proofType), alt: "", loading: "lazy" }));
+    if (proof.is360) thumb.append(h("span", { class: "mark-360", text: "360°" }));
+  } else {
+    const img = mediaImage(source.imageUrl);
+    if (img) thumb.append(img);
+  }
+  return thumb;
+}
+
+function historyRow(entry, tab) {
+  const activity = findActivity(entry.activityId) || { id: entry.activityId, ...entry };
+  const when = entry.updatedAt ? timeAgo(entry.updatedAt) : "ahora";
+  const labels = { accepted: "Aceptado", completed: "Completado", discarded: "Descartado" };
+  const onMain = tab === "completed" && entry.proofUrl
+    ? () => openViewer({ url: entry.proofUrl, type: entry.proofType, is360: entry.is360, title: entry.title, sub: `Completado · ${when}` })
+    : () => openPlan(entry.activityId, entry);
+
+  let actions = [];
+  if (tab === "accepted") {
+    actions = [
+      h("button", { class: "ghost-btn small accent", type: "button", onclick: () => openComplete(activity) }, "Completar"),
+      h("button", { class: "icon-action", type: "button", "aria-label": "Descartar", onclick: () => openDiscard(activity) }, svgUse("i-trash"))
+    ];
+  } else if (tab === "discarded") {
+    actions = [h("button", { class: "ghost-btn small", type: "button", onclick: () => restorePlan(entry) }, "Restaurar")];
+  }
+
+  return h("li", { class: "plan-row" },
+    h("button", { class: "plan-row-main", type: "button", onclick: onMain },
+      planThumb(activity, { proof: tab === "completed" ? entry : null }),
+      h("span", { class: "plan-text" },
+        h("b", { text: entry.title || activity.title || "Plan" }),
+        h("small", { text: `${labels[entry.status]} · ${when}` }),
+        tab === "discarded" && entry.reason && h("span", { class: "reason-chip", text: entry.reason })
+      )
+    ),
+    actions.length > 0 && h("span", { class: "plan-row-actions" }, actions)
+  );
+}
+
+function savedRow(a) {
+  return h("li", { class: "plan-row" },
+    h("button", { class: "plan-row-main", type: "button", onclick: () => openPlan(a.id) },
+      planThumb(a),
+      h("span", { class: "plan-text" },
+        h("b", { text: a.title }),
+        h("small", { text: [CATEGORIES[a.category]?.label, a.duration].filter(Boolean).join(" · ") })
+      )
+    ),
+    h("span", { class: "plan-row-actions" },
+      h("button", { class: "icon-action", type: "button", "aria-label": "Quitar de guardados", onclick: () => toggleSaved(a.id) },
+        svgUse("i-bookmark")))
+  );
+}
+
+async function restorePlan(entry) {
+  try {
+    await restoreFromTrash(state.user.uid, entry.activityId);
+    toast("Restaurado · Tux podrá volver a sugerirlo");
+  } catch (err) {
+    console.error(err);
+    toast("No se pudo restaurar.");
+  }
+}
+
+/* ==========================================================
+   Vista: Galería VR
+   ========================================================== */
+watchVrProofs((items) => {
+  state.vr = items;
+  if (state.view === "vr") renderVr();
+}, (err) => console.warn("Tux: no se pudo cargar la galería VR.", err));
+
+function vrTile(item) {
+  return h("button", {
+    class: "vr-tile", type: "button", "aria-label": `Ver ${item.activityTitle} en 360°`,
+    onclick: () => openViewer({
+      url: item.url, type: item.type, is360: true, title: item.activityTitle,
+      sub: [`por @${item.authorName}`, item.caption].filter(Boolean).join(" · ")
+    })
+  },
+    h("img", { src: item.thumbUrl || item.url, alt: "", loading: "lazy" }),
+    h("span", { class: "badge-360" }, svgUse("i-orbit"), item.type === "video" ? "Vídeo 360°" : "360°"),
+    h("span", { class: "vr-tile-info" },
+      h("b", { text: item.activityTitle }),
+      h("small", { text: `@${item.authorName}${item.sample ? " · Muestra" : ""}` })
+    )
+  );
+}
+
+function renderVr() {
+  if (!memo("vr", JSON.stringify(state.vr.map((v) => v.id)))) return;
+  const community = state.vr;
+  $("#vr").replaceChildren(
+    h("header", { class: "page-head" },
+      h("h1", { class: "page-title", text: "Galería VR" }),
+      h("p", { class: "page-sub", text: "Momentos 360° de la comunidad. Arrastra para mirar alrededor o entra en modo VR con tu visor." })
+    ),
+    h("div", { class: "vr-hero" },
+      h("span", { class: "quick-icon" }, svgUse("i-vr")),
+      h("div", {},
+        h("b", { text: "Comparte en 360°" }),
+        h("p", { text: "Completa tu actividad estrella con una foto o vídeo 360° (proporción 2:1) y aparecerá aquí." })
+      )
+    ),
+    community.length
+      ? h("div", { class: "vr-grid" }, community.map(vrTile))
+      : h("p", { class: "list-empty", text: "Aún no hay contenido 360° de la comunidad. ¡Estrena la galería!" }),
+    community.length < 4 && h("h3", { class: "eyebrow vr-section-title", text: "Muestras de Tux" }),
+    community.length < 4 && h("div", { class: "vr-grid" }, SAMPLE_VR.map(vrTile))
+  );
+}
+
+/* ==========================================================
+   Vista: Ajustes
+   ========================================================== */
+const PREF_OPTIONS = {
+  maxBudget: Object.entries(BUDGETS).map(([value, b]) => ({ value, label: b.short })),
+  maxEffort: Object.entries(EFFORTS).map(([value, e]) => ({ value, label: e.short }))
+};
+
+let prefsTimer;
+function updatePrefs(change) {
+  if (!requireAuth()) return;
+  const prefs = { ...currentPrefs(), ...change };
+  state.profile = { ...(state.profile || {}), prefs };
+  onDataChange();
+  clearTimeout(prefsTimer);
+  prefsTimer = setTimeout(() => {
+    savePrefs(state.user.uid, prefs)
+      .then(() => toast("Preferencias guardadas"))
+      .catch((err) => {
+        console.error(err);
+        toast("No se pudieron guardar las preferencias.");
+      });
+  }, 500);
+}
+
+function renderSettings() {
+  const prefs = currentPrefs();
+  const sig = JSON.stringify([state.user?.uid, state.user?.email, state.profile?.nickname, state.profile?.photoURL,
+    state.profile?.avatarColor, prefs, historyOf("discarded").length, themePreference()]);
+  if (!memo("settings", sig)) return;
+
+  const freqIndex = FREQUENCIES.findIndex((f) => f.days === prefs.frequencyDays);
+  const freqGroup = h("div", { class: "segmented four", role: "radiogroup", "aria-label": "Frecuencia" },
+    FREQUENCIES.map((f) => h("button", {
+      type: "button", role: "radio", class: f.days === prefs.frequencyDays ? "is-active" : "",
+      "aria-checked": String(f.days === prefs.frequencyDays),
+      onclick: () => updatePrefs({ frequencyDays: f.days })
+    }, f.label)),
+    h("span", { class: "segmented-thumb" })
+  );
+  setThumb(freqGroup, freqIndex);
+
+  const interestChips = h("div", { class: "chips" }, Object.entries(CATEGORIES).map(([value, c]) => {
+    const on = prefs.interests.includes(value);
+    const btn = chip({ value, label: `${c.emoji} ${c.label}` }, on);
+    btn.addEventListener("click", () => updatePrefs({
+      interests: on ? prefs.interests.filter((x) => x !== value) : [...prefs.interests, value]
+    }));
+    return btn;
+  }));
+
+  const singleChips = (key) => h("div", { class: "chips" }, PREF_OPTIONS[key].map((opt) => {
+    const btn = chip(opt, prefs[key] === opt.value);
+    btn.addEventListener("click", () => updatePrefs({ [key]: opt.value }));
+    return btn;
+  }));
+
+  const themeGroup = h("div", { class: "segmented three", id: "theme-switch", role: "radiogroup", "aria-label": "Tema" },
+    [["dark", "Oscuro"], ["light", "Claro"], ["system", "Sistema"]].map(([value, label]) =>
+      h("button", { type: "button", role: "radio", dataset: { themeOption: value }, onclick: () => applyTheme(value) }, label)),
+    h("span", { class: "segmented-thumb" })
+  );
+
+  const account = state.user
+    ? h("section", { class: "settings-card" },
+        h("h3", { text: "Cuenta" }),
+        h("div", { class: "account-row" },
+          avatarElement(state.profile),
+          h("div", {},
+            h("b", { text: state.profile?.nickname || state.user.displayName || "Pingüino" }),
+            h("small", { text: state.user.email || "Cuenta de Google" }))
+        ),
+        h("button", { class: "settings-row", type: "button", onclick: openEditProfile },
+          svgUse("i-edit"), "Editar perfil", svgUse("i-chevron", "icon chev")),
+        h("button", { class: "settings-row danger", type: "button", onclick: signOutUser },
+          svgUse("i-logout"), "Cerrar sesión")
+      )
+    : h("section", { class: "settings-card" },
+        h("h3", { text: "Cuenta" }),
+        h("p", { class: "help", style: "margin:0 0 12px", text: "Inicia sesión para guardar tus preferencias, aceptar planes y subir tus pruebas." }),
+        h("button", { class: "primary-btn", type: "button", onclick: () => openAuth("signup") }, "Crear cuenta o iniciar sesión")
+      );
+
+  const freqLong = FREQUENCIES[freqIndex]?.long || "cada día";
+  $("#settings").replaceChildren(
+    h("header", { class: "page-head" }, h("h1", { class: "page-title", text: "Ajustes" })),
+    account,
+    h("section", { class: "settings-card" },
+      h("h3", { text: "Actividad estrella" }),
+      h("div", { class: "field" }, h("span", { text: "Frecuencia de sugerencias" }), freqGroup),
+      h("p", { class: "help", text: `Tux te sugerirá una actividad estrella ${freqLong}. Mínimo una al día, máximo una a la semana.` }),
+      h("div", { class: "field", style: "margin-top:16px" }, h("span", { text: "Intereses" }), interestChips),
+      h("div", { class: "field" }, h("span", { text: "Presupuesto máximo" }), singleChips("maxBudget")),
+      h("div", { class: "field" }, h("span", { text: "Energía máxima" }), singleChips("maxEffort"))
+    ),
+    h("section", { class: "settings-card" },
+      h("h3", { text: "Historial" }),
+      h("button", {
+        class: "settings-row", type: "button",
+        onclick: () => {
+          if (!requireAuth()) return;
+          state.plansTab = "discarded";
+          setView("plans");
+        }
+      }, svgUse("i-trash"), "Papelera",
+        h("span", { class: "count", text: String(historyOf("discarded").length) }), svgUse("i-chevron", "icon chev"))
+    ),
+    h("section", { class: "settings-card" }, h("h3", { text: "Apariencia" }), themeGroup),
+    h("p", { class: "app-version", text: `Tux · Versión ${APP_VERSION}` })
+  );
+  syncThemeUI();
+}
+
+async function signOutUser() {
+  await logOut();
+  setView("dashboard");
+  toast("Hasta pronto 🐧");
+}
+
+/* ==========================================================
+   Editar perfil
+   ========================================================== */
+const editModal = $("#edit-modal");
+const editForm = $("#edit-form");
+const swatches = $("#avatar-swatches");
+
+swatches.append(...AVATAR_COLORS.map((color) =>
+  h("button", { class: "swatch", type: "button", dataset: { color }, "aria-label": `Color ${color}` })));
+swatches.addEventListener("click", (e) => {
+  const s = e.target.closest(".swatch");
+  if (s) $$(".swatch", swatches).forEach((x) => x.classList.toggle("is-active", x === s));
+});
+
+function updateCounters(form) {
+  $$(".counter[data-for]", form).forEach((counter) => {
+    const input = form.elements[counter.dataset.for];
+    counter.textContent = `${input.value.length}/${input.maxLength}`;
+  });
+}
+
+function openEditProfile() {
+  if (!requireAuth()) return;
+  const p = state.profile || {};
+  editForm.nickname.value = p.nickname || "";
+  editForm.bio.value = p.bio || "";
+  editForm.photoURL.value = p.photoURL || "";
+  $$(".swatch", swatches).forEach((s) => s.classList.toggle("is-active", s.dataset.color === (p.avatarColor || "orange")));
+  $("#edit-error").textContent = "";
+  updateCounters(editForm);
+  openModal(editModal);
+}
+
+editForm.addEventListener("input", () => updateCounters(editForm));
+editForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const error = $("#edit-error");
+  const nickname = editForm.nickname.value.trim();
+  const photoURL = editForm.photoURL.value.trim();
+  if (nickname.length < 2) return (error.textContent = "El nickname necesita al menos 2 caracteres.");
+  if (!isValidImageUrl(photoURL)) return (error.textContent = "La foto debe ser una URL https.");
+  const submit = $('button[type="submit"]', editForm);
+  setLoading(submit, true);
+  try {
+    await updateUserProfile(state.user.uid, {
+      nickname, bio: editForm.bio.value, photoURL,
+      avatarColor: $(".swatch.is-active", swatches)?.dataset.color || "orange"
+    });
+    closeModal(editModal);
+    toast("Perfil actualizado");
+  } catch (err) {
+    console.error(err);
+    error.textContent = "No se pudo guardar. Inténtalo de nuevo.";
+  } finally {
+    setLoading(submit, false);
+  }
+});
+
+/* ==========================================================
+   Detalle de plan
+   ========================================================== */
 const planModal = $("#plan-modal");
 
-async function openPlan(id) {
-  const a = await resolveActivity(id);
+async function openPlan(id, fallback) {
+  const a = (await resolveActivity(id)) || (fallback && { id, ...fallback });
   if (!a) return toast("Este plan ya no existe");
   $("#plan-holder").replaceChildren(buildCard(a));
   refreshCardStates();
@@ -901,79 +1387,6 @@ function handleHash() {
   if (match) openPlan(match[1]);
 }
 window.addEventListener("hashchange", handleHash);
-
-/* ==========================================================
-   Ajustes y edición de perfil
-   ========================================================== */
-const settingsModal = $("#settings-modal");
-const editModal = $("#edit-modal");
-const editForm = $("#edit-form");
-
-function openSettings() {
-  syncThemeUI();
-  openModal(settingsModal);
-}
-
-$("#logout-btn").addEventListener("click", async () => {
-  await logOut();
-  closeModal(settingsModal);
-  setView("feed");
-  toast("Hasta pronto 🐧");
-});
-
-$("#edit-profile-btn").addEventListener("click", () => {
-  closeModal(settingsModal);
-  setTimeout(openEditProfile, 280);
-});
-
-const swatches = $("#avatar-swatches");
-swatches.append(...AVATAR_COLORS.map((color) => {
-  const s = h("button", { class: "swatch", type: "button", dataset: { color }, "aria-label": `Color ${color}` });
-  return s;
-}));
-swatches.addEventListener("click", (e) => {
-  const s = e.target.closest(".swatch");
-  if (!s) return;
-  $$(".swatch", swatches).forEach((x) => x.classList.toggle("is-active", x === s));
-});
-
-function openEditProfile() {
-  if (!requireAuth()) return;
-  const p = state.profile || {};
-  editForm.nickname.value = p.nickname || "";
-  editForm.bio.value = p.bio || "";
-  editForm.photoURL.value = p.photoURL || "";
-  $$(".swatch", swatches).forEach((s) => s.classList.toggle("is-active", s.dataset.color === (p.avatarColor || "orange")));
-  $("#edit-error").textContent = "";
-  updateCounters(editForm);
-  openModal(editModal);
-}
-
-editForm.addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const error = $("#edit-error");
-  const nickname = editForm.nickname.value.trim();
-  const photoURL = editForm.photoURL.value.trim();
-  if (nickname.length < 2) return (error.textContent = "El nickname necesita al menos 2 caracteres.");
-  if (!isValidImageUrl(photoURL)) return (error.textContent = "La foto debe ser una URL https.");
-  const submit = $('button[type="submit"]', editForm);
-  setLoading(submit, true);
-  try {
-    await updateUserProfile(state.user.uid, {
-      nickname,
-      bio: editForm.bio.value,
-      photoURL,
-      avatarColor: $(".swatch.is-active", swatches)?.dataset.color || "orange"
-    });
-    closeModal(editModal);
-    toast("Perfil actualizado");
-  } catch (err) {
-    console.error(err);
-    error.textContent = "No se pudo guardar. Inténtalo de nuevo.";
-  } finally {
-    setLoading(submit, false);
-  }
-});
 
 /* ==========================================================
    Publicar TuxPlan
@@ -993,7 +1406,7 @@ const PICK_OPTIONS = {
 
 for (const [field, options] of Object.entries(PICK_OPTIONS)) {
   const container = $(`[data-pick="${field}"]`, createForm);
-  container.append(...options.map(chip));
+  container.append(...options.map((o) => chip(o)));
   container.addEventListener("click", (e) => {
     const btn = e.target.closest(".chip");
     if (!btn) return;
@@ -1020,25 +1433,17 @@ function renderCreatePreview() {
   const draft = { category: pick.category, emoji: CATEGORIES[pick.category].emoji };
   const title = h("div", { class: "create-preview-title", text: createForm.elements.title.value.trim() });
   // Solo recrea la imagen si cambia la URL, para no parpadear al escribir.
-  const existingImg = $("img", holder);
+  const existingImg = $("img:not(.tux-logo)", holder);
   const img = url === previewUrl && existingImg ? existingImg : mediaImage(url);
   previewUrl = url;
   img?.classList.add("is-loaded");
-  holder.replaceChildren(placeholder(draft), img, title);
-}
-
-function updateCounters(form) {
-  $$(".counter[data-for]", form).forEach((counter) => {
-    const input = form.elements[counter.dataset.for];
-    counter.textContent = `${input.value.length}/${input.maxLength}`;
-  });
+  holder.replaceChildren(placeholder(draft), img || "", title);
 }
 
 createForm.addEventListener("input", (e) => {
   updateCounters(createForm);
   if (["title", "imageUrl"].includes(e.target.name)) renderCreatePreview();
 });
-editForm.addEventListener("input", () => updateCounters(editForm));
 
 function openCreate() {
   if (!requireAuth(openCreate)) return;
@@ -1089,11 +1494,9 @@ let commentsActivity = null;
 
 function renderComments(comments) {
   const a = commentsActivity;
-  $("#comments-title").textContent =
-    comments.length === 1 ? "1 comentario" : `${comments.length} comentarios`;
+  $("#comments-title").textContent = comments.length === 1 ? "1 comentario" : `${comments.length} comentarios`;
   if (!comments.length) {
-    commentsList.replaceChildren(h("li", { class: "comments-empty" },
-      svgUse("tux"), "Sé el primero en comentar."));
+    commentsList.replaceChildren(h("li", { class: "comments-empty" }, tuxLogo(), "Sé el primero en comentar."));
     return;
   }
   const uid = state.user?.uid;
@@ -1153,9 +1556,262 @@ commentForm.addEventListener("submit", async (e) => {
 });
 
 /* ==========================================================
+   Justificación de descarte
+   ========================================================== */
+const discardModal = $("#discard-modal");
+const discardForm = $("#discard-form");
+const discardSubmit = $("#discard-submit");
+let discardActivity = null;
+
+$("#discard-reasons").append(...DISCARD_REASONS.map((r) =>
+  h("label", { class: "reason" },
+    h("input", { type: "radio", name: "reason", value: r.id }),
+    h("span", { class: "reason-emoji", text: r.emoji }),
+    h("span", { text: r.label }),
+    h("span", { class: "reason-check", "aria-hidden": "true" })
+  )));
+
+function selectedReason() {
+  const id = discardForm.elements.reason.value;
+  return DISCARD_REASONS.find((r) => r.id === id) || null;
+}
+
+// Sin justificación válida, el botón de descarte permanece desactivado.
+function syncDiscard() {
+  const reason = selectedReason();
+  const note = discardForm.note.value.trim();
+  const needsNote = reason?.id === "other";
+  $("#discard-note-field").hidden = !reason;
+  $("#discard-note-label").textContent = needsNote ? "Cuéntanos el motivo (obligatorio)" : "Comentario (opcional)";
+  discardSubmit.disabled = !reason || (needsNote && note.length < 5);
+  updateCounters(discardForm);
+}
+
+discardForm.addEventListener("input", syncDiscard);
+discardForm.addEventListener("change", syncDiscard);
+
+function openDiscard(a) {
+  if (!requireAuth()) return;
+  discardActivity = a;
+  discardForm.reset();
+  $("#discard-plan").textContent = a.title;
+  $("#discard-error").textContent = "";
+  syncDiscard();
+  openModal(discardModal);
+}
+
+discardForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const reason = selectedReason();
+  if (!reason || discardSubmit.disabled || !discardActivity) return;
+  const note = discardForm.note.value.trim();
+  setLoading(discardSubmit, true);
+  try {
+    await setHistory(state.user.uid, discardActivity, "discarded", { reason: reason.label, ...(note ? { note } : {}) });
+    closeModal(discardModal);
+    toast("Movido a la papelera · Tux no volverá a sugerirlo");
+  } catch (err) {
+    console.error(err);
+    $("#discard-error").textContent = "No se pudo descartar. Inténtalo de nuevo.";
+  } finally {
+    setLoading(discardSubmit, false);
+    syncDiscard();
+  }
+});
+
+/* ==========================================================
+   Completar con prueba multimedia (obligatoria)
+   ========================================================== */
+const completeModal = $("#complete-modal");
+const completeForm = $("#complete-form");
+const proofInput = $("#proof-input");
+const dropzone = $("#dropzone");
+const completeSubmit = $("#complete-submit");
+const completeError = $("#complete-error");
+const proof360 = $("#proof-360");
+let completeCtx = null; // { activity, file, kind, probe }
+
+proofInput.accept = ACCEPT_ATTR;
+
+function resetProof() {
+  if (completeCtx?.probe?.objectUrl) URL.revokeObjectURL(completeCtx.probe.objectUrl);
+  if (completeCtx) Object.assign(completeCtx, { file: null, kind: null, probe: null });
+  proofInput.value = "";
+  dropzone.classList.remove("has-file");
+  $("#proof-preview").hidden = true;
+  $("#proof-preview").replaceChildren();
+  $("#proof-meta").hidden = true;
+  $("#proof-progress").hidden = true;
+  $("#proof-progress span").style.setProperty("--p", "0%");
+  completeSubmit.disabled = true;
+  completeError.textContent = "";
+}
+
+const formatSize = (bytes) => (bytes >= 1048576 ? `${(bytes / 1048576).toFixed(1)} MB` : `${Math.round(bytes / 1024)} KB`);
+
+async function handleProofFile(file) {
+  if (!file || !completeCtx) return;
+  resetProof();
+  try {
+    const kind = validateFile(file);
+    const probe = await probeMedia(file, kind);
+    Object.assign(completeCtx, { file, kind, probe });
+    const detected = isEquirectangular(probe.width, probe.height);
+    const preview = kind === "image"
+      ? h("img", { src: probe.objectUrl, alt: "Vista previa" })
+      : h("video", { src: probe.objectUrl, autoplay: true, loop: true, playsinline: true });
+    if (kind === "video") preview.muted = true;
+    $("#proof-preview").replaceChildren(preview, h("span", { class: "dropzone-change", text: "Cambiar" }));
+    $("#proof-preview").hidden = false;
+    dropzone.classList.add("has-file");
+    proof360.checked = detected;
+    const parts = [
+      kind === "image" ? "Foto" : `Vídeo · ${Math.round(probe.duration || 0)} s`,
+      `${probe.width}×${probe.height}`,
+      formatSize(file.size)
+    ];
+    $("#proof-info").replaceChildren(parts.join(" · "), detected ? h("b", { text: " · 360° detectado" }) : "");
+    $("#proof-meta").hidden = false;
+    completeSubmit.disabled = false;
+    if (!isMediaConfigured()) {
+      completeError.textContent = "La subida de pruebas aún no está configurada: falta la cuenta de Cloudinary en src/mediaConfig.js.";
+    }
+  } catch (err) {
+    completeError.textContent = err.message;
+  }
+}
+
+proofInput.addEventListener("change", () => handleProofFile(proofInput.files[0]));
+["dragenter", "dragover"].forEach((type) => dropzone.addEventListener(type, (e) => {
+  e.preventDefault();
+  dropzone.classList.add("is-dragging");
+}));
+["dragleave", "drop"].forEach((type) => dropzone.addEventListener(type, () => dropzone.classList.remove("is-dragging")));
+dropzone.addEventListener("drop", (e) => {
+  e.preventDefault();
+  handleProofFile(e.dataTransfer.files[0]);
+});
+
+function openComplete(a) {
+  if (!requireAuth()) return;
+  completeCtx = { activity: a, file: null, kind: null, probe: null };
+  completeForm.reset();
+  resetProof();
+  $("#complete-plan").textContent = a.title;
+  if (!isMediaConfigured()) {
+    completeError.textContent = "La subida de pruebas aún no está configurada: falta la cuenta de Cloudinary en src/mediaConfig.js.";
+  }
+  openModal(completeModal);
+}
+
+completeModal.addEventListener("close", () => {
+  resetProof();
+  completeCtx = null;
+});
+
+completeForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const ctx = completeCtx;
+  if (!ctx?.file) return (completeError.textContent = "Adjunta una foto o un vídeo para completar el plan.");
+  if (!isMediaConfigured()) {
+    return (completeError.textContent = "La subida de pruebas aún no está configurada (Cloudinary).");
+  }
+  completeError.textContent = "";
+  setLoading(completeSubmit, true);
+  const progress = $("#proof-progress");
+  const bar = $("span", progress);
+  progress.hidden = false;
+  try {
+    const upload = await uploadToCloudinary(ctx.file, ctx.kind, {
+      folder: `tux/proofs/${state.user.uid}`,
+      onProgress: (p) => bar.style.setProperty("--p", `${Math.round(p * 100)}%`)
+    });
+    const is360 = proof360.checked;
+    const proofId = await createProof({
+      user: state.user, authorName: state.profile?.nickname, activity: ctx.activity, upload,
+      kind: ctx.kind, is360, caption: completeForm.caption.value
+    });
+    await setHistory(state.user.uid, ctx.activity, "completed", {
+      proofId, proofUrl: upload.secure_url, proofType: ctx.kind, is360
+    });
+    closeModal(completeModal);
+    toast(is360 ? "¡Plan completado! Tu 360° ya está en la Galería VR 🎉" : "¡Plan completado! 🎉");
+  } catch (err) {
+    console.error(err);
+    completeError.textContent = err.message || "No se pudo completar. Inténtalo de nuevo.";
+  } finally {
+    setLoading(completeSubmit, false);
+    completeSubmit.disabled = !completeCtx?.file;
+  }
+});
+
+/* ==========================================================
+   Visor multimedia / 360° / VR
+   ========================================================== */
+const viewerModal = $("#viewer-modal");
+const viewerStage = $("#viewer-stage");
+const soundBtn = $("#viewer-sound");
+let viewerSession = null;
+let viewerToken = 0;
+
+function setSoundIcon(muted) {
+  soundBtn.replaceChildren(svgUse(muted ? "i-mute" : "i-volume"));
+  soundBtn.setAttribute("aria-label", muted ? "Activar sonido" : "Silenciar");
+}
+
+async function openViewer({ url, type = "image", is360 = false, title = "", sub = "" }) {
+  const token = ++viewerToken;
+  viewerSession?.destroy();
+  viewerSession = null;
+  viewerStage.replaceChildren();
+  $("#viewer-title").textContent = title;
+  $("#viewer-sub").textContent = sub;
+  $("#viewer-badge").hidden = !is360;
+  soundBtn.hidden = type !== "video";
+  setSoundIcon(true);
+  openModal(viewerModal);
+
+  let media;
+  if (is360) {
+    $("#viewer-loading").hidden = false;
+    try {
+      const session = await mountVrScene(viewerStage, { url, type });
+      if (token !== viewerToken || !viewerModal.open) return session.destroy();
+      viewerSession = session;
+      media = session.media;
+    } catch (err) {
+      console.error(err);
+      toast(err.message || "No se pudo abrir el visor 360°.");
+      closeModal(viewerModal);
+      return;
+    } finally {
+      $("#viewer-loading").hidden = true;
+    }
+  } else {
+    media = type === "video"
+      ? h("video", { src: url, autoplay: true, loop: true, playsinline: true, controls: true })
+      : h("img", { src: url, alt: title });
+    if (type === "video") media.muted = true;
+    viewerStage.append(media);
+  }
+  soundBtn.onclick = () => {
+    if (!media || media.tagName !== "VIDEO") return;
+    media.muted = !media.muted;
+    if (!media.muted) media.play?.().catch(() => {});
+    setSoundIcon(media.muted);
+  };
+}
+
+viewerModal.addEventListener("close", () => {
+  viewerToken++;
+  viewerSession?.destroy();
+  viewerSession = null;
+  viewerStage.replaceChildren();
+});
+
+/* ==========================================================
    Arranque
    ========================================================== */
-// Completa un inicio con Google que haya vuelto por redirección (fallback del popup).
 completeRedirectSignIn()
   .then((user) => user && toast(`Hola, ${user.displayName || "pingüino"} 🐧`))
   .catch((err) => {
@@ -1167,5 +1823,6 @@ completeRedirectSignIn()
 syncThemeUI();
 setAuthMode("login");
 renderActiveFilters();
-renderProfile();
+renderHeader();
+setView("dashboard");
 handleHash();

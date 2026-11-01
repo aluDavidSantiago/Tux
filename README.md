@@ -1,70 +1,67 @@
 # Tux 🐧
 
-**Tux** es una red social minimalista, fluida y elegante, guiada por un pingüino. Sirve para descubrir y compartir actividades casuales, económicas y de bajo esfuerzo: planes pequeños que rompen la rutina sin gastar mucho ni cansarse.
+**Tux** es una red social minimalista para descubrir y compartir actividades casuales, económicas y de bajo esfuerzo. Cada día (o cada semana) Tux elige **una actividad estrella** para ti, la cierras con una prueba en foto, vídeo o **360°/VR**, y la comunidad la ve en una galería inmersiva.
 
-🔗 **Demo:** https://aludavidsantiago.github.io/Tux/
+🔗 **Demo:** https://aludavidsantiago.github.io/Tux/ · **Versión:** 1.0.0-beta
 
 ## 🚀 Características
-- **Feed a pantalla completa:** un plan por pantalla con snap-scroll vertical, al estilo Shorts/Reels. Doble toque = «Me apunto».
-- **Tarjetas completas:** categoría (Chill, Aventura, Gastronomía, Cultura, Nocturno), presupuesto (Gratis · $ · $$ · $$$), esfuerzo (Bajo · Medio · Alto), momento del día y duración.
-- **Social en tiempo real:** contador de «Me apunto» y comentarios sincronizados con Firestore; guardar planes y marcarlos como «Lo hice».
-- **Filtros y búsqueda:** presupuesto (Gratis, <10 €, 10–25 €, +25 €), energía (Relax total, Paseo ligero, Activo), vibe y cuándo (Día, Noche, Finde), combinables y aplicados al instante.
-- **Acceso libre:** cualquiera puede navegar el feed, filtrar, ver planes y abrir enlaces compartidos; al interactuar (apuntarse, guardar, comentar, publicar o abrir el perfil) aparece el acceso.
-- **Cuentas:** email/contraseña (con recuperación) y «Continuar con Google» (popup con fallback a redirección); perfil creado automáticamente en `users/{uid}` sin bloquear el acceso si falla.
-- **Mascota vectorial:** Tux en SVG geométrico plano (`currentColor` + acento `#FF6B35`), adaptado a claro y oscuro.
-- **Perfil:** avatar de Tux interactivo (toca para cambiar su color) o foto propia, nickname y bio editables, pestañas *Mis planes*, *Guardados* y *Cumplidos*.
-- **Publicar TuxPlan:** formulario con vista previa en vivo, imagen por URL o ilustración de Tux.
-- **Tema claro / oscuro / sistema**, con negro OLED (`#0D0D0E`) y acento naranja pingüino (`#FF6B35` → `#FF8800`).
-- **Mobile-first:** en escritorio la app se muestra en un marco centrado tipo teléfono.
+- **Panel · TuxPlans Central:** una única actividad estrella por periodo, elegida según tus intereses, presupuesto y energía máximos, con los motivos de la elección a la vista y una cuenta atrás hasta la siguiente.
+- **Frecuencia configurable:** de una sugerencia al día a una a la semana (diaria, 2 días, 3 días, semanal).
+- **Descarte con justificación:** descartar exige elegir un motivo («No tengo el material requerido», «Ubicación inalcanzable», «No es mi vibe»…). Sin motivo, el botón no se activa.
+- **Mis planes:** en curso, completados, guardados y **papelera**. Lo descartado no se vuelve a sugerir salvo que lo restaures.
+- **Prueba multimedia obligatoria:** completar un plan exige adjuntar JPG/PNG (≤10 MB) o MP4 (≤100 MB).
+- **360°/VR:** detección automática de contenido equirectangular (2:1) y visor inmersivo con A-Frame (WebXR) en la Galería VR, en las pruebas y en las imágenes 360° de los planes.
+- **Explorar:** feed vertical a pantalla completa con filtros, búsqueda, «Me apunto», comentarios y guardados.
+- **Acceso libre:** cualquiera navega; al interactuar aparece el acceso (email/contraseña o Google).
+- **Minimal Monolith:** negro OLED `#0D0D0E`, acento `#FF6B35`, microinteracciones y tema oscuro/claro/sistema.
 
 ## 🛠️ Stack técnico
-- **Frontend:** HTML5, CSS3 y JavaScript (módulos ES nativos, sin paso de build).
-- **Backend:** Firebase Authentication y Cloud Firestore (SDK modular vía CDN).
+- **Frontend:** HTML5, CSS3 y JavaScript (módulos ES nativos, sin build).
+- **Backend:** Firebase Authentication + Cloud Firestore.
+- **Multimedia:** Cloudinary (subida sin firma) · visor 360° con A-Frame 1.6 (carga bajo demanda).
 - **Hosting:** GitHub Pages.
 
 ## 📂 Estructura
 ```text
 ├── index.html              # Redirige a public/ (entrada de GitHub Pages)
 ├── public/
-│   ├── index.html          # Vistas, modales y sprite de iconos/mascota
-│   ├── css/styles.css      # Sistema de diseño, temas y animaciones
-│   ├── js/app.js           # Lógica de interfaz
-│   └── assets/images/
+│   ├── index.html          # Vistas, modales y sprite de iconos
+│   ├── css/styles.css      # Sistema de diseño
+│   ├── js/app.js           # Orquestador de la interfaz
+│   ├── js/ui.js            # Utilidades DOM, toasts y modales
+│   ├── js/vr.js            # Visor 360°/VR (A-Frame)
+│   └── img/                # Logo, favicon e icono táctil
 ├── src/
-│   ├── firebaseConfig.js   # Inicialización de Firebase App, Auth y Firestore
-│   ├── auth.js             # Email/contraseña, Google, recuperación, sesión
-│   ├── users.js            # Perfiles (users/{uid})
-│   ├── activities.js       # Catálogo de opciones, feed en tiempo real, publicación, filtros
-│   └── social.js           # Me apunto, guardados, cumplidos y comentarios
-├── firestore.rules         # Reglas de seguridad
-├── firebase.json / .firebaserc
-└── README.md
+│   ├── firebaseConfig.js   # Firebase App, Auth y Firestore
+│   ├── mediaConfig.js      # ⚙️ Cloudinary (cloud name + upload preset)
+│   ├── auth.js · users.js  # Acceso y perfiles
+│   ├── activities.js       # Catálogo, feed en tiempo real y filtros
+│   ├── social.js           # Me apunto, guardados y comentarios
+│   ├── plans.js            # Preferencias, estrella e historial
+│   ├── recommendations.js  # Motor de la actividad estrella (funciones puras)
+│   └── media.js            # Validación, detección 360°, subida y pruebas
+├── firestore.rules
+└── firebase.json / .firebaserc
 ```
 
 ## 🗃️ Modelo de datos (Firestore)
 
-| Colección | ID | Campos |
-|-----------|----|--------|
-| `users` | `{uid}` | `nickname`, `photoURL`, `avatarColor`, `bio`, `createdAt` |
-| `activities` | auto | `title`, `description`, `emoji`, `imageUrl`, `category`, `budget`, `effort`, `when`, `duration`, `authorId`, `authorName`, `likeCount`, `commentCount`, `createdAt` |
-| `activities/{id}/comments` | auto | `authorId`, `authorName`, `text`, `createdAt` |
-| `likes` · `saved` · `completed` | `{uid}_{activityId}` | `uid`, `activityId`, `createdAt` |
+| Ruta | Campos |
+|------|--------|
+| `users/{uid}` | `nickname`, `photoURL`, `avatarColor`, `bio`, `prefs { frequencyDays, interests[], maxBudget, maxEffort }`, `star { activityId, period, frequencyDays }`, `createdAt` |
+| `users/{uid}/history/{activityId}` | `status` (accepted · completed · discarded), `title`, `category`, `emoji`, `imageUrl`, `reason`, `note`, `proofId`, `proofUrl`, `proofType`, `is360`, `updatedAt` |
+| `activities/{id}` (+ `comments`) | plan publicado con contadores `likeCount` / `commentCount` |
+| `likes` · `saved` | `{uid}_{activityId}` → `uid`, `activityId`, `createdAt` |
+| `proofs/{id}` | `uid`, `authorName`, `activityId`, `activityTitle`, `url`, `thumbUrl`, `type`, `is360`, `width`, `height`, `caption`, `createdAt` |
 
-Valores: `category` ∈ chill · aventura · gastronomia · cultura · nocturno; `budget` ∈ free · low · mid · high; `effort` ∈ low · mid · high; `when` ∈ day · night · weekend.
+Las reglas exigen `reason` al descartar y una URL de Cloudinary como prueba al completar.
 
-Los contadores `likeCount`/`commentCount` se actualizan en el mismo batch que el like o comentario, y las reglas verifican que cuadren. Mientras no haya planes publicados, el feed muestra planes de ejemplo.
-
-## 🔐 Configuración de Firebase
-1. **Authentication → Sign-in method:** activar *Email/Password* y *Google*.
-2. **Authentication → Settings → Authorized domains:** añadir `aludavidsantiago.github.io`.
-3. Desplegar reglas:
-   ```bash
-   firebase deploy --only firestore:rules
-   ```
+## 🔐 Configuración
+1. **Firebase Auth:** activar *Email/Password* y *Google*; añadir `aludavidsantiago.github.io` a los dominios autorizados.
+2. **Cloudinary:** crear un *upload preset* en modo **Unsigned** y rellenar `cloudName` y `uploadPreset` en `src/mediaConfig.js`.
+3. **Reglas:** `firebase deploy --only firestore:rules`
 
 ## 💻 Desarrollo local
-Los módulos ES requieren servirse por HTTP (no `file://`). Desde la raíz del repo:
-
 ```bash
 python3 -m http.server 8080
 # abre http://localhost:8080/public/
