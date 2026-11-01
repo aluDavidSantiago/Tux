@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="description" content="Tux: descubre y comparte planes casuales, económicos y de bajo esfuerzo.">
+  <meta name="theme-color" content="#0f1115">
+  <title>Tux</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐧</text></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="./css/styles.css">
+  <script>
+    // Aplica el tema guardado antes del primer pintado para evitar parpadeos.
+    try {
+      const t = localStorage.getItem("tux-theme");
+      if (t) document.documentElement.dataset.theme = t;
+    } catch (e) {}
+  </script>
+</head>
+<body>
+  <!-- Mascota reutilizable -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <symbol id="tux" viewBox="0 0 64 64">
+      <ellipse cx="32" cy="36" rx="20" ry="24" fill="var(--penguin-body)"/>
+      <ellipse cx="32" cy="40" rx="13" ry="18" fill="var(--penguin-belly)"/>
+      <circle cx="25" cy="24" r="3.2" fill="var(--penguin-belly)"/>
+      <circle cx="39" cy="24" r="3.2" fill="var(--penguin-belly)"/>
+      <circle cx="25.6" cy="24.4" r="1.6" fill="var(--penguin-body)"/>
+      <circle cx="38.4" cy="24.4" r="1.6" fill="var(--penguin-body)"/>
+      <path d="M27 30 L32 35 L37 30 Z" fill="var(--accent)"/>
+      <ellipse cx="24" cy="60" rx="6" ry="2.5" fill="var(--accent)"/>
+      <ellipse cx="40" cy="60" rx="6" ry="2.5" fill="var(--accent)"/>
+    </symbol>
+  </svg>
+
+  <header class="topbar">
+    <a class="brand" href="./" aria-label="Tux inicio">
+      <svg class="brand-mark"><use href="#tux"/></svg>
+      <span>tux</span>
+    </a>
+    <div class="topbar-actions">
+      <button class="icon-btn" id="theme-toggle" type="button" aria-label="Cambiar tema">
+        <span class="icon-sun">☀︎</span><span class="icon-moon">☾</span>
+      </button>
+      <button class="pill-btn" id="auth-btn" type="button">Entrar</button>
+    </div>
+  </header>
+
+  <section class="filters" aria-label="Filtros">
+    <div class="filter-group" role="radiogroup" aria-label="Presupuesto" data-filter="budget">
+      <span class="filter-label">Presupuesto</span>
+      <button class="chip is-active" data-value="all" role="radio" aria-checked="true">Todo</button>
+      <button class="chip" data-value="free" role="radio" aria-checked="false">Gratis</button>
+      <button class="chip" data-value="low" role="radio" aria-checked="false">$</button>
+      <button class="chip" data-value="mid" role="radio" aria-checked="false">$$</button>
+    </div>
+    <div class="filter-group" role="radiogroup" aria-label="Esfuerzo" data-filter="effort">
+      <span class="filter-label">Esfuerzo</span>
+      <button class="chip is-active" data-value="all" role="radio" aria-checked="true">Todo</button>
+      <button class="chip" data-value="low" role="radio" aria-checked="false">Relax</button>
+      <button class="chip" data-value="mid" role="radio" aria-checked="false">Moderado</button>
+    </div>
+  </section>
+
+  <main class="feed" id="feed" aria-live="polite">
+    <!-- Las tarjetas se renderizan desde js/app.js -->
+  </main>
+
+  <template id="card-template">
+    <article class="card">
+      <div class="card-visual"><span class="card-emoji"></span></div>
+      <div class="card-body">
+        <div class="card-tags"></div>
+        <h2 class="card-title"></h2>
+        <p class="card-desc"></p>
+      </div>
+      <aside class="card-actions">
+        <button class="action" type="button" aria-label="Me gusta">♡</button>
+        <button class="action" type="button" aria-label="Guardar">⌑</button>
+        <button class="action" type="button" aria-label="Compartir">↗</button>
+      </aside>
+    </article>
+  </template>
+
+  <template id="empty-template">
+    <div class="empty">
+      <svg class="empty-mark"><use href="#tux"/></svg>
+      <p>Tux no encontró planes con esos filtros.<br>Prueba otra combinación.</p>
+    </div>
+  </template>
+
+  <nav class="bottombar" aria-label="Navegación">
+    <button class="nav-item is-active" type="button">Inicio</button>
+    <button class="nav-item nav-new" type="button" aria-label="Compartir plan">＋</button>
+    <button class="nav-item" type="button">Perfil</button>
+  </nav>
+
+  <script type="module" src="./js/app.js"></script>
+</body>
+</html>
