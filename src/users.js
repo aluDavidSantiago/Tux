@@ -43,13 +43,21 @@ async function createIfMissing(user) {
   if (snap.exists()) return snap.data();
   const profile = {
     nickname: defaultNickname(user),
-    photoURL: user.photoURL || "",
+    photoURL: (user.photoURL || "").slice(0, 500),
     avatarColor: "orange",
     bio: "Explorando planes sencillos con Tux 🐧",
     createdAt: serverTimestamp()
   };
-  await setDoc(ref, profile);
-  return profile;
+  try {
+    await setDoc(ref, profile);
+    return profile;
+  } catch (err) {
+    // Si algún campo opcional es rechazado, crea al menos el perfil mínimo.
+    console.warn("Tux: perfil completo rechazado, creando perfil mínimo.", err);
+    const minimal = { nickname: profile.nickname || "pinguino", createdAt: serverTimestamp() };
+    await setDoc(ref, minimal);
+    return minimal;
+  }
 }
 
 export const watchUserProfile = (uid, callback) =>

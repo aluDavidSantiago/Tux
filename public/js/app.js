@@ -5,7 +5,7 @@ import {
   matchesFilters, normalize, millis, isValidImageUrl
 } from "../../src/activities.js";
 import {
-  signInWithGoogle, signInWithEmail, signUpWithEmail, resetPassword, logOut,
+  signInWithGoogle, completeRedirectSignIn, signInWithEmail, signUpWithEmail, resetPassword, logOut,
   watchSession, authErrorMessage
 } from "../../src/auth.js";
 import { AVATAR_COLORS, ensureUserProfile, watchUserProfile, updateUserProfile } from "../../src/users.js";
@@ -219,15 +219,23 @@ function setAuthMode(mode) {
   authError.classList.remove("is-ok");
 }
 
-function openAuth(mode = "login") {
+const AUTH_DEFAULT_SUBTITLE = "Planes sencillos, cerca de ti.";
+const AUTH_PROMPT = "Crea una cuenta o inicia sesión para interactuar en Tux";
+let afterAuth = null; // acción pendiente tras iniciar sesión (abrir perfil, publicar…)
+
+function openAuth(mode = "login", message = AUTH_DEFAULT_SUBTITLE) {
   setAuthMode(mode);
+  const subtitle = $("#auth-subtitle");
+  subtitle.textContent = message;
+  subtitle.classList.toggle("is-prompt", message !== AUTH_DEFAULT_SUBTITLE);
   openModal(authModal);
 }
 
-function requireAuth(message = "Entra para continuar") {
+// Navegar es libre; interactuar exige sesión. Devuelve true si ya hay usuario.
+function requireAuth(then = null) {
   if (state.user) return true;
-  toast(message);
-  openAuth();
+  afterAuth = then;
+  openAuth("login", AUTH_PROMPT);
   return false;
 }
 
@@ -236,12 +244,20 @@ $("#auth-tabs").addEventListener("click", (e) => {
   if (tab) setAuthMode(tab.dataset.tab);
 });
 
-async function afterSignIn(user) {
+function afterSignIn(user) {
+  if (!user) return; // Google pasó a redirección: la página se recargará.
   closeModal(authModal);
   authForm.reset();
   const name = state.profile?.nickname || user.displayName || "pingüino";
   toast(`Hola, ${name} 🐧`);
+  const next = afterAuth;
+  afterAuth = null;
+  if (next) setTimeout(next, 300);
 }
+
+authModal.addEventListener("close", () => {
+  if (!state.user) afterAuth = null;
+});
 
 authForm.addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -259,8 +275,9 @@ authForm.addEventListener("submit", async (e) => {
     const user = authMode === "signup"
       ? await signUpWithEmail(email, password, nickname)
       : await signInWithEmail(email, password);
-    await afterSignIn(user);
+    afterSignIn(user);
   } catch (err) {
+    console.error("Tux: error de autenticación.", err);
     authError.textContent = authErrorMessage(err);
   } finally {
     setLoading(submit, false);
@@ -271,8 +288,9 @@ $("#google-btn").addEventListener("click", async (e) => {
   const btn = e.currentTarget;
   setLoading(btn, true);
   try {
-    await afterSignIn(await signInWithGoogle());
+    afterSignIn(await signInWithGoogle());
   } catch (err) {
+    console.error("Tux: error con Google.", err);
     authError.classList.remove("is-ok");
     authError.textContent = authErrorMessage(err);
   } finally {
@@ -501,7 +519,7 @@ setTimeout(() => {
 async function toggleLike(id, card) {
   const a = findActivity(id);
   if (a?.sample) return toast("Es un plan de ejemplo · publica el tuyo 🐧");
-  if (!requireAuth("Entra para apuntarte a planes")) return;
+  if (!requireAuth()) return;
   const liked = !state.liked.has(id);
   // Actualización optimista; el snapshot de Firestore confirma después.
   if (a) a.likeCount = Math.max(0, (a.likeCount || 0) + (liked ? 1 : -1));
@@ -520,7 +538,7 @@ async function toggleLike(id, card) {
 }
 
 async function toggleRelation(kind, id, card) {
-  if (!requireAuth(kind === "save" ? "Entra para guardar planes" : "Entra para registrar lo que haces")) return;
+  if (!requireAuth()) return;
   const listKey = kind === "save" ? "saved" : "completed";
   const on = !state[listKey].includes(id);
   state[listKey] = on ? [id, ...state[listKey]] : state[listKey].filter((x) => x !== id);
@@ -729,6 +747,7 @@ $(".tabbar").addEventListener("click", (e) => {
   if (!item) return;
   const target = item.dataset.nav;
   if (target === "create") return openCreate();
+  if (target === "profile" && !requireAuth(() => setView("profile"))) return;
   if (target === "feed" && state.view === "feed") return feed.scrollTo({ top: 0, behavior: "smooth" });
   setView(target);
 });
@@ -898,6 +917,7 @@ function openSettings() {
 $("#logout-btn").addEventListener("click", async () => {
   await logOut();
   closeModal(settingsModal);
+  setView("feed");
   toast("Hasta pronto 🐧");
 });
 
@@ -1021,7 +1041,7 @@ createForm.addEventListener("input", (e) => {
 editForm.addEventListener("input", () => updateCounters(editForm));
 
 function openCreate() {
-  if (!requireAuth("Entra para publicar tu TuxPlan")) return;
+  if (!requireAuth(openCreate)) return;
   $("#create-error").textContent = "";
   syncPickers();
   updateCounters(createForm);
@@ -1114,14 +1134,14 @@ commentForm.text.addEventListener("focus", () => {
   if (!state.user) {
     commentForm.text.blur();
     closeModal(commentsModal);
-    requireAuth("Entra para comentar");
+    requireAuth(() => openComments(commentsActivity.id));
   }
 });
 
 commentForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   const text = commentForm.text.value.trim();
-  if (!text || !commentsActivity || !requireAuth("Entra para comentar")) return;
+  if (!text || !commentsActivity || !requireAuth()) return;
   commentForm.text.value = "";
   try {
     await addComment(commentsActivity.id, state.user, state.profile?.nickname || "pingüino", text);
@@ -1135,6 +1155,15 @@ commentForm.addEventListener("submit", async (e) => {
 /* ==========================================================
    Arranque
    ========================================================== */
+// Completa un inicio con Google que haya vuelto por redirección (fallback del popup).
+completeRedirectSignIn()
+  .then((user) => user && toast(`Hola, ${user.displayName || "pingüino"} 🐧`))
+  .catch((err) => {
+    console.error("Tux: error al volver de Google.", err);
+    openAuth("login");
+    authError.textContent = authErrorMessage(err);
+  });
+
 syncThemeUI();
 setAuthMode("login");
 renderActiveFilters();

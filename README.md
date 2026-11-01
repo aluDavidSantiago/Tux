@@ -9,7 +9,9 @@
 - **Tarjetas completas:** categoría (Chill, Aventura, Gastronomía, Cultura, Nocturno), presupuesto (Gratis · $ · $$ · $$$), esfuerzo (Bajo · Medio · Alto), momento del día y duración.
 - **Social en tiempo real:** contador de «Me apunto» y comentarios sincronizados con Firestore; guardar planes y marcarlos como «Lo hice».
 - **Filtros y búsqueda:** presupuesto (Gratis, <10 €, 10–25 €, +25 €), energía (Relax total, Paseo ligero, Activo), vibe y cuándo (Día, Noche, Finde), combinables y aplicados al instante.
-- **Cuentas:** email/contraseña (con recuperación) y «Continuar con Google»; perfil creado automáticamente en `users/{uid}`.
+- **Acceso libre:** cualquiera puede navegar el feed, filtrar, ver planes y abrir enlaces compartidos; al interactuar (apuntarse, guardar, comentar, publicar o abrir el perfil) aparece el acceso.
+- **Cuentas:** email/contraseña (con recuperación) y «Continuar con Google» (popup con fallback a redirección); perfil creado automáticamente en `users/{uid}` sin bloquear el acceso si falla.
+- **Mascota vectorial:** Tux en SVG geométrico plano (`currentColor` + acento `#FF6B35`), adaptado a claro y oscuro.
 - **Perfil:** avatar de Tux interactivo (toca para cambiar su color) o foto propia, nickname y bio editables, pestañas *Mis planes*, *Guardados* y *Cumplidos*.
 - **Publicar TuxPlan:** formulario con vista previa en vivo, imagen por URL o ilustración de Tux.
 - **Tema claro / oscuro / sistema**, con negro OLED (`#0D0D0E`) y acento naranja pingüino (`#FF6B35` → `#FF8800`).

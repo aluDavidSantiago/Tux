@@ -6,7 +6,7 @@ import { getAuth } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-aut
 import { getFirestore } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 const firebaseConfig = {
-  apiKey: "AIzaSyBH2drrxf3p2L0CJYUyPjvH8JfhIQEsyD4",
+  apiKey: "AIzaSyBH2drrxf3p2L0CJYUyPjVh8JfhIQEsyD4",
   authDomain: "tuxsocial.firebaseapp.com",
   projectId: "tuxsocial",
   storageBucket: "tuxsocial.firebasestorage.app",

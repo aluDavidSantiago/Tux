@@ -13,12 +13,13 @@ service cloud.firestore {
     }
 
     // ---------- Perfiles ----------
+    // nickname y createdAt son obligatorios; el resto es opcional pero se valida si existe.
     function validUser(d) {
       return d.keys().hasOnly(['nickname', 'photoURL', 'avatarColor', 'bio', 'createdAt'])
         && d.nickname is string && d.nickname.size() >= 1 && d.nickname.size() <= 24
-        && d.bio is string && d.bio.size() <= 160
-        && d.photoURL is string && d.photoURL.size() <= 500
-        && d.avatarColor in ['orange', 'ice', 'mint', 'lilac', 'night'];
+        && (!('bio' in d) || (d.bio is string && d.bio.size() <= 160))
+        && (!('photoURL' in d) || (d.photoURL is string && d.photoURL.size() <= 500))
+        && (!('avatarColor' in d) || d.avatarColor in ['orange', 'ice', 'mint', 'lilac', 'night']);
     }
 
     match /users/{uid} {

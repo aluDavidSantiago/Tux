@@ -6,7 +6,7 @@
   <meta name="description" content="Tux: descubre y comparte planes casuales, económicos y de bajo esfuerzo.">
   <meta name="theme-color" content="#0D0D0E">
   <title>Tux</title>
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐧</text></svg>">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect x='14' y='4' width='36' height='52' rx='18' fill='%230D0D0E'/><path d='M32 17.5C29.6 14.6 20 14 20 23v15.5C20 46 25.4 52 32 52s12-6 12-13.5V23c0-9-9.6-8.4-12-5.5z' fill='%23fff'/><circle cx='26.5' cy='25' r='2.2' fill='%230D0D0E'/><circle cx='37.5' cy='25' r='2.2' fill='%230D0D0E'/><path d='M28.6 30.5h6.8l-3.4 5z' fill='%23FF6B35'/><rect x='19' y='55' width='10' height='5' rx='2.5' fill='%23FF6B35'/><rect x='35' y='55' width='10' height='5' rx='2.5' fill='%23FF6B35'/></svg>">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -22,20 +22,15 @@
 <body>
   <!-- ============ Sprite: mascota e iconos ============ -->
   <svg width="0" height="0" style="position:absolute" aria-hidden="true">
-    <symbol id="tux" viewBox="0 0 120 120">
-      <path d="M27 62 Q12 82 23 98 Q31 86 33 70 Z" fill="var(--penguin-body)"/>
-      <path d="M93 62 Q108 82 97 98 Q89 86 87 70 Z" fill="var(--penguin-body)"/>
-      <ellipse cx="60" cy="66" rx="34" ry="42" fill="var(--penguin-body)"/>
-      <ellipse cx="60" cy="76" rx="23" ry="30" fill="var(--penguin-belly)"/>
-      <ellipse cx="48" cy="46" rx="7" ry="8" fill="var(--penguin-belly)"/>
-      <ellipse cx="72" cy="46" rx="7" ry="8" fill="var(--penguin-belly)"/>
-      <circle cx="49.5" cy="47.5" r="3.4" fill="var(--penguin-body)"/>
-      <circle cx="70.5" cy="47.5" r="3.4" fill="var(--penguin-body)"/>
-      <circle cx="50.6" cy="46.2" r="1.1" fill="var(--penguin-belly)"/>
-      <circle cx="71.6" cy="46.2" r="1.1" fill="var(--penguin-belly)"/>
-      <path d="M51 57 Q60 53 69 57 Q60 67 51 57 Z" fill="var(--accent)"/>
-      <ellipse cx="47" cy="108" rx="10" ry="4.5" fill="var(--accent)"/>
-      <ellipse cx="73" cy="108" rx="10" ry="4.5" fill="var(--accent)"/>
+    <!-- Tux: geometría plana. Cuerpo = currentColor, cara = --tux-belly, pico/patas = --tux-accent -->
+    <symbol id="tux" viewBox="0 0 64 64">
+      <rect x="14" y="4" width="36" height="52" rx="18" fill="currentColor"/>
+      <path d="M32 17.5C29.6 14.6 20 14 20 23v15.5C20 46 25.4 52 32 52s12-6 12-13.5V23c0-9-9.6-8.4-12-5.5z" fill="var(--tux-belly, #fff)"/>
+      <circle cx="26.5" cy="25" r="2.2" fill="currentColor"/>
+      <circle cx="37.5" cy="25" r="2.2" fill="currentColor"/>
+      <path d="M28.6 30.5h6.8a.8.8 0 0 1 .6 1.3l-3.4 4a.8.8 0 0 1-1.2 0l-3.4-4a.8.8 0 0 1 .6-1.3z" fill="var(--tux-accent, #FF6B35)"/>
+      <rect x="19" y="55" width="10" height="5" rx="2.5" fill="var(--tux-accent, #FF6B35)"/>
+      <rect x="35" y="55" width="10" height="5" rx="2.5" fill="var(--tux-accent, #FF6B35)"/>
     </symbol>
 
     <symbol id="i-home" viewBox="0 0 24 24"><path d="M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/></symbol>
@@ -112,7 +107,7 @@
     <div class="auth-hero">
       <svg class="auth-mark"><use href="#tux"/></svg>
       <h2 id="auth-title">Bienvenido a Tux</h2>
-      <p>Planes sencillos, cerca de ti.</p>
+      <p id="auth-subtitle">Planes sencillos, cerca de ti.</p>
     </div>
     <div class="segmented" role="tablist" id="auth-tabs">
       <button type="button" role="tab" class="is-active" data-tab="login" aria-selected="true">Iniciar sesión</button>
