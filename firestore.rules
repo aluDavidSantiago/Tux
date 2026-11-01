@@ -1,0 +1,128 @@
+rules_version = '2';
+
+// Reglas de seguridad de Tux.
+// Colecciones: users, activities (+ comments), likes, saved, completed.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function isUser(uid) { return signedIn() && request.auth.uid == uid; }
+    function activityPath(id) { return /databases/$(database)/documents/activities/$(id); }
+    function onlyChanged(keys) {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(keys);
+    }
+
+    // ---------- Perfiles ----------
+    function validUser(d) {
+      return d.keys().hasOnly(['nickname', 'photoURL', 'avatarColor', 'bio', 'createdAt'])
+        && d.nickname is string && d.nickname.size() >= 1 && d.nickname.size() <= 24
+        && d.bio is string && d.bio.size() <= 160
+        && d.photoURL is string && d.photoURL.size() <= 500
+        && d.avatarColor in ['orange', 'ice', 'mint', 'lilac', 'night'];
+    }
+
+    match /users/{uid} {
+      allow read: if true;
+      allow create: if isUser(uid) && validUser(request.resource.data)
+        && request.resource.data.createdAt == request.time;
+      allow update: if isUser(uid) && validUser(request.resource.data)
+        && request.resource.data.createdAt == resource.data.createdAt;
+      allow delete: if false;
+    }
+
+    // ---------- Planes ----------
+    function validActivity(d) {
+      return d.keys().hasOnly(['title', 'description', 'emoji', 'imageUrl', 'category', 'budget',
+                               'effort', 'when', 'duration', 'authorId', 'authorName',
+                               'likeCount', 'commentCount', 'createdAt'])
+        && d.title is string && d.title.size() >= 3 && d.title.size() <= 80
+        && d.description is string && d.description.size() <= 280
+        && d.emoji is string && d.emoji.size() <= 16
+        && d.imageUrl is string && d.imageUrl.size() <= 500
+        && (d.imageUrl == '' || d.imageUrl.matches('https://.+'))
+        && d.category in ['chill', 'aventura', 'gastronomia', 'cultura', 'nocturno']
+        && d.budget in ['free', 'low', 'mid', 'high']
+        && d.effort in ['low', 'mid', 'high']
+        && d.when in ['day', 'night', 'weekend']
+        && d.duration in ['15 min', '30 min', '1 h', '2 h', 'Medio día']
+        && d.authorName is string && d.authorName.size() <= 24;
+    }
+
+    // +1/-1 en likeCount solo si el doc likes/{uid}_{id} se crea/borra en el mismo batch.
+    function validLikeChange(id) {
+      let likePath = /databases/$(database)/documents/likes/$(request.auth.uid + '_' + id);
+      let delta = request.resource.data.likeCount - resource.data.likeCount;
+      return onlyChanged(['likeCount'])
+        && ((delta == 1 && !exists(likePath) && existsAfter(likePath))
+          || (delta == -1 && exists(likePath) && !existsAfter(likePath)));
+    }
+
+    function validCommentCountChange() {
+      let delta = request.resource.data.commentCount - resource.data.commentCount;
+      return onlyChanged(['commentCount']) && (delta == 1 || delta == -1)
+        && request.resource.data.commentCount >= 0;
+    }
+
+    match /activities/{id} {
+      allow read: if true;
+      allow create: if signedIn() && validActivity(request.resource.data)
+        && request.resource.data.authorId == request.auth.uid
+        && request.resource.data.likeCount == 0
+        && request.resource.data.commentCount == 0
+        && request.resource.data.createdAt == request.time;
+      allow update: if signedIn() && (validLikeChange(id) || validCommentCountChange());
+      allow delete: if isUser(resource.data.authorId);
+
+      match /comments/{commentId} {
+        allow read: if true;
+        allow create: if signedIn()
+          && request.resource.data.keys().hasOnly(['authorId', 'authorName', 'text', 'createdAt'])
+          && request.resource.data.authorId == request.auth.uid
+          && request.resource.data.authorName is string
+          && request.resource.data.authorName.size() <= 24
+          && request.resource.data.text is string
+          && request.resource.data.text.size() >= 1
+          && request.resource.data.text.size() <= 500
+          && request.resource.data.createdAt == request.time
+          && getAfter(activityPath(id)).data.commentCount == get(activityPath(id)).data.commentCount + 1;
+        allow delete: if signedIn()
+          && (resource.data.authorId == request.auth.uid
+            || get(activityPath(id)).data.authorId == request.auth.uid)
+          && getAfter(activityPath(id)).data.commentCount == get(activityPath(id)).data.commentCount - 1;
+      }
+    }
+
+    // ---------- Relaciones usuario ↔ plan ----------
+    function validRelation(relId) {
+      let d = request.resource.data;
+      return signedIn()
+        && d.keys().hasOnly(['uid', 'activityId', 'createdAt'])
+        && d.uid == request.auth.uid
+        && d.activityId is string
+        && relId == request.auth.uid + '_' + d.activityId
+        && d.createdAt == request.time;
+    }
+
+    match /likes/{likeId} {
+      allow read: if signedIn() && resource.data.uid == request.auth.uid;
+      allow create: if validRelation(likeId)
+        && getAfter(activityPath(request.resource.data.activityId)).data.likeCount
+          == get(activityPath(request.resource.data.activityId)).data.likeCount + 1;
+      // Si el plan ya no existe, el like huérfano se puede borrar sin tocar contadores.
+      allow delete: if signedIn() && resource.data.uid == request.auth.uid
+        && (!exists(activityPath(resource.data.activityId))
+          || getAfter(activityPath(resource.data.activityId)).data.likeCount
+            == get(activityPath(resource.data.activityId)).data.likeCount - 1);
+    }
+
+    match /saved/{savedId} {
+      allow read, delete: if signedIn() && resource.data.uid == request.auth.uid;
+      allow create, update: if validRelation(savedId);
+    }
+
+    match /completed/{completedId} {
+      allow read, delete: if signedIn() && resource.data.uid == request.auth.uid;
+      allow create, update: if validRelation(completedId);
+    }
+  }
+}
