@@ -66,12 +66,18 @@ Las reglas exigen `reason` al descartar y una prueba al completar. Las pruebas l
 ```bash
 cd server
 npm install
-npm start            # http://localhost:8787 → /Volumes/HDD/Tux_Storage
+npm start            # manual: http://localhost:8787 → /Volumes/HDD/Tux_Storage
 ```
 - Estructura: `/Volumes/HDD/Tux_Storage/users/{uid}/{uuid}.jpg|png|mp4` (+ `{uuid}.thumb.jpg` para vídeos).
 - **Aislamiento:** solo el servidor escribe; cada subida exige un ID token de Firebase válido y va a la carpeta de ese uid. Se comprueban tipo, firma binaria, tamaño (10 MB imagen, 100 MB vídeo), cuota (5 GB/usuario) y ritmo (20 subidas/min).
 - **No navegable:** no hay listados de carpetas, ni rutas de borrado o modificación por la web; los archivos se sirven solo por su nombre UUID exacto.
 - **Seguridad del disco:** si el HDD no está montado, el servidor no arranca ni escribe (evita crear `/Volumes/HDD` en el disco interno).
+- **Arranque automático (macOS):** el servidor está instalado como LaunchAgent (`~/Library/LaunchAgents/com.tux.mediaserver.plist`). Arranca al iniciar sesión, espera a que `/Volumes/HDD` esté montado, se relanza solo si se cae y no se relanza mientras falte el disco. Logs en `~/Library/Logs/Tux/media-server.log`.
+  ```bash
+  npm run agent:install     # (re)instalar tras mover el repo o cambiar de Node
+  npm run agent:status      # estado del servicio y del disco
+  npm run agent:uninstall   # quitarlo
+  ```
 - **Administración** (solo terminal):
   ```bash
   npm run admin -- stats

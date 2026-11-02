@@ -7,7 +7,10 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "admin": "node admin.js"
+    "admin": "node admin.js",
+    "agent:install": "bash launchd/install-agent.sh",
+    "agent:uninstall": "bash launchd/uninstall-agent.sh",
+    "agent:status": "launchctl print gui/$(id -u)/com.tux.mediaserver | grep -E 'state|pid|last exit' ; curl -s http://localhost:8787/health; echo"
   },
   "engines": {
     "node": ">=20"
