@@ -3,5 +3,6 @@
 set -euo pipefail
 LABEL="com.tux.tunnel"
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
-rm -f "$HOME/Library/LaunchAgents/$LABEL.plist" "$HOME/Library/Logs/Tux/tunnel-url.txt"
+rm -f "$HOME/Library/LaunchAgents/$LABEL.plist" "$HOME/Library/Logs/Tux/tunnel-url.txt" \
+  "$HOME/Library/Application Support/Tux/tunnel.sh"
 echo "Túnel desinstalado."

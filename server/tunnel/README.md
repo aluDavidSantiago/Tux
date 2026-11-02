@@ -51,6 +51,10 @@ npm run tunnel:status      # estado + URL pública
 npm run tunnel:uninstall
 ```
 
+macOS no deja a launchd leer scripts dentro de `~/Documents`, así que el instalador copia `tunnel.sh` a
+`~/Library/Application Support/Tux/` y el servicio lo ejecuta desde ahí: **vuelve a ejecutar `npm run tunnel:install`
+tras modificar `tunnel.sh`**.
+
 Convive con el LaunchAgent del servidor (`com.tux.mediaserver`): el servidor solo corre con el HDD montado
 y el túnel se relanza solo si se corta la conexión. Logs en `~/Library/Logs/Tux/tunnel.log`.
 

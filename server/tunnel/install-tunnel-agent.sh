@@ -1,6 +1,9 @@
 #!/bin/bash
 # Instala el túnel de Cloudflare como LaunchAgent (com.tux.tunnel), junto al del servidor
 # (com.tux.mediaserver). Usa el túnel con nombre si existe (URL fija); si no, un túnel rápido.
+# macOS (TCC) no deja a launchd leer scripts dentro de ~/Documents: se copia tunnel.sh a
+# ~/Library/Application Support/Tux/ y el servicio lo ejecuta desde ahí. Vuelve a ejecutar este
+# instalador tras modificar tunnel.sh.
 # Uso: bash server/tunnel/install-tunnel-agent.sh [quick|run]
 set -euo pipefail
 
@@ -13,12 +16,15 @@ if [[ -z "$MODE" ]]; then
 fi
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 LOG_DIR="$HOME/Library/Logs/Tux"
+APP_DIR="$HOME/Library/Application Support/Tux"
+SCRIPT="$APP_DIR/tunnel.sh"
 
 command -v cloudflared >/dev/null || [[ -x /opt/homebrew/bin/cloudflared ]] || [[ -x /usr/local/bin/cloudflared ]] || {
   echo "Instala antes cloudflared:  brew install cloudflared" >&2
   exit 1
 }
-mkdir -p "$HOME/Library/LaunchAgents" "$LOG_DIR"
+mkdir -p "$HOME/Library/LaunchAgents" "$LOG_DIR" "$APP_DIR"
+install -m 0755 "$DIR/tunnel.sh" "$SCRIPT"
 
 cat > "$PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -30,11 +36,11 @@ cat > "$PLIST" <<PLIST
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
-    <string>$DIR/tunnel.sh</string>
+    <string>$SCRIPT</string>
     <string>$MODE</string>
   </array>
   <key>WorkingDirectory</key>
-  <string>$DIR</string>
+  <string>$APP_DIR</string>
   <!-- Siempre activo: si se corta la conexión o cloudflared termina, launchd lo relanza. -->
   <key>RunAtLoad</key>
   <true/>
@@ -64,4 +70,5 @@ launchctl enable "gui/$(id -u)/$LABEL"
 
 echo "Instalado: $PLIST (modo $MODE)"
 echo "Logs:      $LOG_DIR/tunnel.log"
-echo "URL:       bash $DIR/tunnel.sh url"
+echo "Script:    $SCRIPT"
+echo "URL:       bash \"$SCRIPT\" url"
