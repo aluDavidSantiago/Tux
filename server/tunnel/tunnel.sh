@@ -13,7 +13,7 @@
 set -euo pipefail
 
 PORT="${TUX_PORT:-8787}"
-ORIGIN="http://127.0.0.1:$PORT"
+ORIGIN="${TUX_ORIGIN:-http://127.0.0.1:${PORT}}"
 NAME="${TUX_TUNNEL_NAME:-tux-media}"
 CONF_DIR="$HOME/.cloudflared"
 CONF="$CONF_DIR/$NAME.yml"
@@ -48,7 +48,8 @@ cmd_quick() {
   bin="$(find_cloudflared)"
   wait_for_server
   rm -f "$URL_FILE"
-  echo "Abriendo túnel rápido hacia $ORIGIN…"
+  # Llaves obligatorias: sin ellas, el bash 3.2 de macOS (locale C en launchd) lee «…» como parte del nombre.
+  echo "Abriendo túnel rápido hacia ${ORIGIN}…"
   # Se lee la salida de cloudflared para capturar la URL asignada (https://xxxx.trycloudflare.com).
   "$bin" tunnel --no-autoupdate --url "$ORIGIN" 2>&1 | while IFS= read -r line; do
     echo "$line"
