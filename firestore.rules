@@ -41,12 +41,18 @@ service cloud.firestore {
         && (!('star' in d) || validStar(d.star));
     }
 
-    function cloudinaryUrl(u) { return u is string && u.size() <= 500 && u.matches('https://res[.]cloudinary[.]com/.+'); }
+    // Referencia multimedia: URL de Cloudinary o archivo del servidor local en la carpeta del PROPIO usuario.
+    function mediaRef(u) {
+      return u is string && u.size() <= 500 && (
+        u.matches('https://res[.]cloudinary[.]com/.+')
+        || u.matches('local:users/' + request.auth.uid + '/[0-9a-f-]{36}([.]thumb)?[.](jpg|png|mp4)'));
+    }
+    function optionalMediaRef(u) { return u == '' || mediaRef(u); }
 
     // Historial: completar exige prueba multimedia; descartar exige justificación.
     function validHistory(d, id) {
       return d.keys().hasOnly(['activityId', 'status', 'title', 'category', 'emoji', 'imageUrl',
-                               'reason', 'note', 'proofId', 'proofUrl', 'proofType', 'is360', 'updatedAt'])
+                               'reason', 'note', 'proofId', 'proofUrl', 'proofThumb', 'proofType', 'is360', 'updatedAt'])
         && d.activityId == id
         && d.status in ['accepted', 'completed', 'discarded']
         && d.title is string && d.title.size() <= 80
@@ -54,7 +60,8 @@ service cloud.firestore {
         && d.updatedAt == request.time
         && (!('note' in d) || (d.note is string && d.note.size() <= 280))
         && (d.status != 'discarded' || (d.reason is string && d.reason.size() >= 3 && d.reason.size() <= 80))
-        && (d.status != 'completed' || (cloudinaryUrl(d.proofUrl) && d.proofId is string
+        && (!('proofThumb' in d) || optionalMediaRef(d.proofThumb))
+        && (d.status != 'completed' || (mediaRef(d.proofUrl) && d.proofId is string
                                         && d.proofType in ['image', 'video'] && d.is360 is bool));
     }
 
@@ -169,8 +176,8 @@ service cloud.firestore {
         && request.resource.data.keys().hasOnly(['uid', 'authorName', 'activityId', 'activityTitle', 'url',
                                                  'thumbUrl', 'type', 'is360', 'width', 'height', 'caption', 'createdAt'])
         && request.resource.data.uid == request.auth.uid
-        && cloudinaryUrl(request.resource.data.url)
-        && cloudinaryUrl(request.resource.data.thumbUrl)
+        && mediaRef(request.resource.data.url)
+        && optionalMediaRef(request.resource.data.thumbUrl)
         && request.resource.data.type in ['image', 'video']
         && request.resource.data.is360 is bool
         && request.resource.data.width is int && request.resource.data.height is int

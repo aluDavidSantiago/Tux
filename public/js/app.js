@@ -18,10 +18,9 @@ import {
 } from "../../src/plans.js";
 import { currentPeriod, msUntilNextPeriod, pickStar, scoreActivity } from "../../src/recommendations.js";
 import {
-  ACCEPT_ATTR, validateFile, probeMedia, isEquirectangular, uploadToCloudinary, cloudinaryThumb,
-  createProof, watchVrProofs, SAMPLE_VR
+  ACCEPT_ATTR, validateFile, probeMedia, isEquirectangular, uploadMedia, checkMediaServer,
+  resolveMediaUrl, mediaThumbUrl, createProof, watchVrProofs, SAMPLE_VR
 } from "../../src/media.js";
-import { isMediaConfigured } from "../../src/mediaConfig.js";
 import {
   $, $$, h, svgUse, tuxLogo, formatCount, timeAgo, formatCountdown, toast, setLoading, setThumb,
   openModal, closeModal, initModals
@@ -371,7 +370,7 @@ function buildCard(a) {
       h("h2", { class: "card-title", text: a.title }),
       a.description && h("p", { class: "card-desc", text: a.description }),
       metaRow(a, "card-meta"),
-      h("p", { class: "card-author" }, "por ", h("b", { text: `@${a.authorName || "tux"}` }),
+      h("p", { class: "card-author" }, "por ", h("b", { text: `@${a.authorName || "Tux"}` }),
         a.createdAt ? ` · ${timeAgo(a.createdAt)}` : "")
     ),
     h("div", { class: "card-rail" },
@@ -988,13 +987,16 @@ function proofThumb(entry, title) {
   return h("button", {
     class: "proof-thumb", type: "button", "aria-label": "Ver prueba",
     onclick: () => openViewer({
-      url: entry.proofUrl, type: entry.proofType, is360: entry.is360, title, sub: "Tu prueba de actividad"
+      url: resolveMediaUrl(entry.proofUrl), type: entry.proofType, is360: entry.is360, title, sub: "Tu prueba de actividad"
     })
   },
-    h("img", { src: cloudinaryThumb(entry.proofUrl, entry.proofType), alt: "", loading: "lazy" }),
+    h("img", { src: proofThumbUrl(entry), alt: "", loading: "lazy" }),
     entry.is360 && h("span", { class: "badge-360" }, svgUse("i-orbit"), "360°")
   );
 }
+
+const proofThumbUrl = (entry) =>
+  mediaThumbUrl({ url: entry.proofUrl, thumbUrl: entry.proofThumb, type: entry.proofType });
 
 async function acceptPlan(a) {
   if (!requireAuth()) return;
@@ -1074,7 +1076,8 @@ async function fillPlanList(list, tab) {
 function planThumb(source, { proof } = {}) {
   const thumb = h("span", { class: "plan-thumb" }, placeholder(source));
   if (proof?.proofUrl) {
-    thumb.append(h("img", { src: cloudinaryThumb(proof.proofUrl, proof.proofType), alt: "", loading: "lazy" }));
+    const src = proofThumbUrl(proof);
+    if (src) thumb.append(h("img", { src, alt: "", loading: "lazy" }));
     if (proof.is360) thumb.append(h("span", { class: "mark-360", text: "360°" }));
   } else {
     const img = mediaImage(source.imageUrl);
@@ -1088,7 +1091,7 @@ function historyRow(entry, tab) {
   const when = entry.updatedAt ? timeAgo(entry.updatedAt) : "ahora";
   const labels = { accepted: "Aceptado", completed: "Completado", discarded: "Descartado" };
   const onMain = tab === "completed" && entry.proofUrl
-    ? () => openViewer({ url: entry.proofUrl, type: entry.proofType, is360: entry.is360, title: entry.title, sub: `Completado · ${when}` })
+    ? () => openViewer({ url: resolveMediaUrl(entry.proofUrl), type: entry.proofType, is360: entry.is360, title: entry.title, sub: `Completado · ${when}` })
     : () => openPlan(entry.activityId, entry);
 
   let actions = [];
@@ -1151,11 +1154,11 @@ function vrTile(item) {
   return h("button", {
     class: "vr-tile", type: "button", "aria-label": `Ver ${item.activityTitle} en 360°`,
     onclick: () => openViewer({
-      url: item.url, type: item.type, is360: true, title: item.activityTitle,
+      url: resolveMediaUrl(item.url), type: item.type, is360: true, title: item.activityTitle,
       sub: [`por @${item.authorName}`, item.caption].filter(Boolean).join(" · ")
     })
   },
-    h("img", { src: item.thumbUrl || item.url, alt: "", loading: "lazy" }),
+    h("img", { src: mediaThumbUrl(item) || resolveMediaUrl(item.url), alt: "", loading: "lazy" }),
     h("span", { class: "badge-360" }, svgUse("i-orbit"), item.type === "video" ? "Vídeo 360°" : "360°"),
     h("span", { class: "vr-tile-info" },
       h("b", { text: item.activityTitle }),
@@ -1673,9 +1676,6 @@ async function handleProofFile(file) {
     $("#proof-info").replaceChildren(parts.join(" · "), detected ? h("b", { text: " · 360° detectado" }) : "");
     $("#proof-meta").hidden = false;
     completeSubmit.disabled = false;
-    if (!isMediaConfigured()) {
-      completeError.textContent = "La subida de pruebas aún no está configurada: falta la cuenta de Cloudinary en src/mediaConfig.js.";
-    }
   } catch (err) {
     completeError.textContent = err.message;
   }
@@ -1698,10 +1698,11 @@ function openComplete(a) {
   completeForm.reset();
   resetProof();
   $("#complete-plan").textContent = a.title;
-  if (!isMediaConfigured()) {
-    completeError.textContent = "La subida de pruebas aún no está configurada: falta la cuenta de Cloudinary en src/mediaConfig.js.";
-  }
   openModal(completeModal);
+  // Avisa pronto si el almacenamiento (servidor local + disco HDD) no está disponible.
+  checkMediaServer().then((status) => {
+    if (!status.ok && completeCtx?.activity === a) completeError.textContent = status.message || "El almacenamiento no está disponible.";
+  });
 }
 
 completeModal.addEventListener("close", () => {
@@ -1713,26 +1714,26 @@ completeForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   const ctx = completeCtx;
   if (!ctx?.file) return (completeError.textContent = "Adjunta una foto o un vídeo para completar el plan.");
-  if (!isMediaConfigured()) {
-    return (completeError.textContent = "La subida de pruebas aún no está configurada (Cloudinary).");
-  }
   completeError.textContent = "";
   setLoading(completeSubmit, true);
   const progress = $("#proof-progress");
   const bar = $("span", progress);
   progress.hidden = false;
   try {
-    const upload = await uploadToCloudinary(ctx.file, ctx.kind, {
-      folder: `tux/proofs/${state.user.uid}`,
+    const server = await checkMediaServer();
+    if (!server.ok) throw new Error(server.message || "El almacenamiento no está disponible.");
+    const upload = await uploadMedia({
+      file: ctx.file, kind: ctx.kind, user: state.user, thumbBlob: ctx.probe.thumbBlob,
       onProgress: (p) => bar.style.setProperty("--p", `${Math.round(p * 100)}%`)
     });
     const is360 = proof360.checked;
     const proofId = await createProof({
       user: state.user, authorName: state.profile?.nickname, activity: ctx.activity, upload,
-      kind: ctx.kind, is360, caption: completeForm.caption.value
+      kind: ctx.kind, is360, caption: completeForm.caption.value,
+      width: ctx.probe.width, height: ctx.probe.height
     });
     await setHistory(state.user.uid, ctx.activity, "completed", {
-      proofId, proofUrl: upload.secure_url, proofType: ctx.kind, is360
+      proofId, proofUrl: upload.url, proofThumb: upload.thumbUrl || "", proofType: ctx.kind, is360
     });
     closeModal(completeModal);
     toast(is360 ? "¡Plan completado! Tu 360° ya está en la Galería VR 🎉" : "¡Plan completado! 🎉");

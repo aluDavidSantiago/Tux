@@ -16,7 +16,7 @@ export const AVATAR_COLORS = ["orange", "ice", "mint", "lilac", "night"];
 const userRef = (uid) => doc(db, "users", uid);
 
 function defaultNickname(user) {
-  const base = user.displayName || (user.email || "tux").split("@")[0];
+  const base = user.displayName || (user.email || "Tux").split("@")[0];
   return base.slice(0, 24);
 }
 

@@ -1,5 +1,7 @@
-// Módulo multimedia: validación, detección 360° (equirectangular), subida a Cloudinary
-// y registro de pruebas en Firestore.
+// Módulo multimedia: validación, detección 360° (equirectangular), subida (servidor local en el HDD
+// o Cloudinary) y registro de pruebas en Firestore.
+// Las referencias a archivos locales se guardan como "local:users/{uid}/{archivo}" y se resuelven
+// contra LOCAL_MEDIA_SERVER al mostrarlas.
 // proofs/{id}: { uid, authorName, activityId, activityTitle, url, thumbUrl, type, is360,
 //                width, height, caption, createdAt }
 import {
@@ -12,7 +14,7 @@ import {
   serverTimestamp
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { db } from "./firebaseConfig.js";
-import { CLOUDINARY, isMediaConfigured } from "./mediaConfig.js";
+import { MEDIA_PROVIDER, LOCAL_MEDIA_SERVER, CLOUDINARY, isMediaConfigured } from "./mediaConfig.js";
 
 const MB = 1024 * 1024;
 export const ACCEPTED_TYPES = {
@@ -31,7 +33,27 @@ export function validateFile(file) {
   return spec.kind;
 }
 
-// Lee dimensiones (y duración en vídeo) desde el archivo local.
+// Fotograma JPG del vídeo para usarlo como miniatura (el servidor local no transcodifica).
+function captureVideoFrame(video) {
+  return new Promise((resolve) => {
+    const draw = () => {
+      const scale = Math.min(1, 960 / (video.videoWidth || 960));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.round(video.videoWidth * scale);
+      canvas.height = Math.round(video.videoHeight * scale);
+      try {
+        canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
+        canvas.toBlob((blob) => resolve(blob), "image/jpeg", 0.82);
+      } catch {
+        resolve(null);
+      }
+    };
+    video.addEventListener("seeked", draw, { once: true });
+    video.currentTime = Math.min(0.5, (video.duration || 1) / 2);
+  });
+}
+
+// Lee dimensiones (y duración y miniatura en vídeo) desde el archivo local.
 export function probeMedia(file, kind) {
   const objectUrl = URL.createObjectURL(file);
   return new Promise((resolve, reject) => {
@@ -42,10 +64,13 @@ export function probeMedia(file, kind) {
       img.src = objectUrl;
     } else {
       const video = document.createElement("video");
-      video.preload = "metadata";
+      video.preload = "auto";
       video.muted = true;
-      video.onloadedmetadata = () =>
-        resolve({ objectUrl, width: video.videoWidth, height: video.videoHeight, duration: video.duration });
+      video.playsInline = true;
+      video.onloadeddata = async () => {
+        const thumbBlob = await captureVideoFrame(video);
+        resolve({ objectUrl, width: video.videoWidth, height: video.videoHeight, duration: video.duration, thumbBlob });
+      };
       video.onerror = () => reject(new Error("No se pudo leer el vídeo."));
       video.src = objectUrl;
     }
@@ -56,29 +81,11 @@ export function probeMedia(file, kind) {
 export const isEquirectangular = (width, height) =>
   width >= 1024 && height > 0 && Math.abs(width / height - 2) <= 0.04;
 
-export function uploadToCloudinary(file, kind, { folder, onProgress } = {}) {
-  if (!isMediaConfigured()) {
-    return Promise.reject(new Error("La subida de archivos aún no está configurada (Cloudinary)."));
-  }
-  const form = new FormData();
-  form.append("file", file);
-  form.append("upload_preset", CLOUDINARY.uploadPreset);
-  if (folder) form.append("folder", folder);
+/* ---------- Resolución de referencias ---------- */
+export const isLocalRef = (ref) => typeof ref === "string" && ref.startsWith("local:");
 
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open("POST", `https://api.cloudinary.com/v1_1/${CLOUDINARY.cloudName}/${kind}/upload`);
-    xhr.upload.onprogress = (e) => e.lengthComputable && onProgress?.(e.loaded / e.total);
-    xhr.onload = () => {
-      let data = {};
-      try { data = JSON.parse(xhr.responseText); } catch {}
-      if (xhr.status >= 200 && xhr.status < 300 && data.secure_url) resolve(data);
-      else reject(new Error(data.error?.message || `Error al subir (${xhr.status}).`));
-    };
-    xhr.onerror = () => reject(new Error("Sin conexión durante la subida."));
-    xhr.send(form);
-  });
-}
+export const resolveMediaUrl = (ref) =>
+  isLocalRef(ref) ? `${LOCAL_MEDIA_SERVER}/media/${ref.slice("local:".length)}` : ref;
 
 // Miniatura vía transformaciones de Cloudinary (primer fotograma en vídeo).
 export function cloudinaryThumb(url, kind) {
@@ -87,18 +94,102 @@ export function cloudinaryThumb(url, kind) {
   return kind === "video" ? thumb.replace(/\.[a-z0-9]+$/i, ".jpg") : thumb;
 }
 
-export async function createProof({ user, authorName, activity, upload, kind, is360, caption }) {
+// URL de miniatura para una prueba guardada ({ url, thumbUrl, type }).
+export function mediaThumbUrl({ url, thumbUrl, type }) {
+  if (thumbUrl) return resolveMediaUrl(thumbUrl);
+  if (url?.startsWith("https://res.cloudinary.com/")) return cloudinaryThumb(url, type);
+  return type === "image" ? resolveMediaUrl(url) : "";
+}
+
+/* ---------- Subida ---------- */
+function xhrUpload({ url, body, headers = {}, onProgress }) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url);
+    Object.entries(headers).forEach(([k, v]) => xhr.setRequestHeader(k, v));
+    xhr.upload.onprogress = (e) => e.lengthComputable && onProgress?.(e.loaded / e.total);
+    xhr.onload = () => {
+      let data = {};
+      try { data = JSON.parse(xhr.responseText); } catch {}
+      if (xhr.status >= 200 && xhr.status < 300) resolve(data);
+      else reject(new Error(data.error?.message || data.error || `Error al subir (${xhr.status}).`));
+    };
+    xhr.onerror = () => reject(new Error(
+      MEDIA_PROVIDER === "local"
+        ? "No se pudo contactar con el servidor de almacenamiento local."
+        : "Sin conexión durante la subida."
+    ));
+    xhr.send(body);
+  });
+}
+
+// Comprueba que el servidor local responde y que el disco externo está montado.
+export async function checkMediaServer() {
+  if (MEDIA_PROVIDER !== "local") return { ok: isMediaConfigured() };
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 3000);
+  try {
+    const res = await fetch(`${LOCAL_MEDIA_SERVER}/health`, { signal: controller.signal, cache: "no-store" });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && data.ok) return { ok: true };
+    return { ok: false, message: "El disco externo HDD no está conectado al servidor de Tux." };
+  } catch {
+    return { ok: false, message: "El servidor de almacenamiento de Tux no responde. Arráncalo con «npm start» en server/." };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Sube el archivo (y su miniatura si es vídeo). Devuelve { url, thumbUrl } como referencias guardables.
+export async function uploadMedia({ file, kind, user, thumbBlob, onProgress }) {
+  if (MEDIA_PROVIDER === "local") {
+    const token = await user.getIdToken();
+    const main = await xhrUpload({
+      url: `${LOCAL_MEDIA_SERVER}/api/media`,
+      body: file,
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": file.type, "X-Tux-Role": "main" },
+      onProgress
+    });
+    let thumbUrl = kind === "image" ? main.key : "";
+    if (kind === "video" && thumbBlob) {
+      const thumb = await xhrUpload({
+        url: `${LOCAL_MEDIA_SERVER}/api/media`,
+        body: thumbBlob,
+        headers: {
+          Authorization: `Bearer ${token}`, "Content-Type": "image/jpeg",
+          "X-Tux-Role": "thumb", "X-Tux-Media-Id": main.id
+        }
+      }).catch(() => null);
+      thumbUrl = thumb?.key || "";
+    }
+    return { url: main.key, thumbUrl };
+  }
+
+  if (!isMediaConfigured()) throw new Error("La subida de archivos aún no está configurada (Cloudinary).");
+  const form = new FormData();
+  form.append("file", file);
+  form.append("upload_preset", CLOUDINARY.uploadPreset);
+  form.append("folder", `Tux/proofs/${user.uid}`);
+  const data = await xhrUpload({
+    url: `https://api.cloudinary.com/v1_1/${CLOUDINARY.cloudName}/${kind}/upload`,
+    body: form,
+    onProgress
+  });
+  return { url: data.secure_url, thumbUrl: cloudinaryThumb(data.secure_url, kind) };
+}
+
+export async function createProof({ user, authorName, activity, upload, kind, is360, caption, width, height }) {
   const ref = await addDoc(collection(db, "proofs"), {
     uid: user.uid,
     authorName: (authorName || "pingüino").slice(0, 24),
     activityId: activity.id,
     activityTitle: activity.title.slice(0, 80),
-    url: upload.secure_url,
-    thumbUrl: cloudinaryThumb(upload.secure_url, kind),
+    url: upload.url,
+    thumbUrl: upload.thumbUrl || "",
     type: kind,
     is360,
-    width: upload.width || 0,
-    height: upload.height || 0,
+    width: Math.round(width || 0),
+    height: Math.round(height || 0),
     caption: (caption || "").trim().slice(0, 200),
     createdAt: serverTimestamp()
   });
