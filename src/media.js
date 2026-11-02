@@ -1,7 +1,7 @@
-// Módulo multimedia: validación, detección 360° (equirectangular), subida (servidor local en el HDD
-// o Cloudinary) y registro de pruebas en Firestore.
-// Las referencias a archivos locales se guardan como "local:users/{uid}/{archivo}" y se resuelven
-// contra LOCAL_MEDIA_SERVER al mostrarlas.
+// Módulo multimedia: validación, detección 360° (equirectangular), subida al servidor de Tux (HDD
+// externo, accesible por túnel HTTPS) y registro de pruebas en Firestore.
+// Las referencias a archivos se guardan como "local:users/{uid}/{archivo}" y se resuelven contra el
+// servidor multimedia activo (mediaConfig.js) con el ticket de lectura de la sesión.
 // proofs/{id}: { uid, authorName, activityId, activityTitle, url, thumbUrl, type, is360,
 //                width, height, caption, createdAt }
 import {
@@ -11,18 +11,19 @@ import {
   deleteDoc,
   query,
   where,
+  orderBy,
   limit,
   onSnapshot,
   serverTimestamp
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { db } from "./firebaseConfig.js";
-import { MEDIA_PROVIDER, LOCAL_MEDIA_SERVER, CLOUDINARY, isMediaConfigured } from "./mediaConfig.js";
+import { mediaServerUrl, onMediaServerChange } from "./mediaConfig.js";
 
 const MB = 1024 * 1024;
-// Los JPG/MP4 360° exportados de Insta360 pesan mucho: el HDD local admite más que Cloudinary gratis.
-export const MEDIA_LIMITS = MEDIA_PROVIDER === "local"
-  ? { image: 50 * MB, video: 500 * MB }
-  : { image: 10 * MB, video: 100 * MB };
+// Los JPG/MP4 360° exportados de Insta360 pesan mucho: límites pensados para el HDD.
+export const MEDIA_LIMITS = { image: 50 * MB, video: 500 * MB };
+// Cloudflare corta las peticiones de más de 100 MB: por encima de esto se sube por trozos.
+const CHUNK_THRESHOLD = 48 * MB;
 export const ACCEPTED_TYPES = {
   "image/jpeg": { kind: "image", max: MEDIA_LIMITS.image },
   "image/png": { kind: "image", max: MEDIA_LIMITS.image },
@@ -110,13 +111,83 @@ export async function detectSphericalMetadata(file, kind) {
   return false;
 }
 
+/* ---------- Sesión de lectura (ticket firmado por el servidor) ---------- */
+// <img> y <video> no pueden enviar el ID token: el servidor lo valida una vez y entrega un ticket
+// que se añade a las URLs. Sin sesión no hay ticket y el HDD no entrega nada.
+let mediaUser = null;
+let ticket = null;          // { value, expiresAt, server }
+let ticketTimer = null;
+const accessListeners = new Set();
+
+export function onMediaAccessChange(callback) {
+  accessListeners.add(callback);
+  return () => accessListeners.delete(callback);
+}
+const notifyAccess = () => accessListeners.forEach((cb) => cb());
+
+async function refreshTicket() {
+  clearTimeout(ticketTimer);
+  const user = mediaUser;
+  if (!user) return;
+  const server = mediaServerUrl();
+  let next = null;
+  try {
+    const res = await fetch(`${server}/api/media/ticket`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${await user.getIdToken()}` },
+      cache: "no-store"
+    });
+    if (res.ok) {
+      const data = await res.json();
+      next = { value: data.ticket, expiresAt: data.expiresAt, server };
+    }
+  } catch {
+    next = null;
+  }
+  if (mediaUser !== user) return;
+  // Renueva una hora antes de caducar; si el servidor no responde, reintenta en un minuto.
+  const wait = next ? Math.max(60000, next.expiresAt - Date.now() - 3600000) : 60000;
+  ticketTimer = setTimeout(refreshTicket, wait);
+  if (next?.value === ticket?.value && next?.server === ticket?.server) return;
+  if (!next && ticket?.server === server && ticket.expiresAt > Date.now()) return;
+  ticket = next;
+  notifyAccess();
+}
+
+export function startMediaSession(user) {
+  if (mediaUser?.uid === user?.uid) return;
+  mediaUser = user;
+  ticket = null;
+  notifyAccess();
+  refreshTicket();
+}
+
+export function stopMediaSession() {
+  mediaUser = null;
+  ticket = null;
+  clearTimeout(ticketTimer);
+  notifyAccess();
+}
+
+onMediaServerChange(() => {
+  ticket = null;
+  notifyAccess();
+  refreshTicket();
+});
+
 /* ---------- Resolución de referencias ---------- */
 export const isLocalRef = (ref) => typeof ref === "string" && ref.startsWith("local:");
 
-export const resolveMediaUrl = (ref) =>
-  isLocalRef(ref) ? `${LOCAL_MEDIA_SERVER}/media/${ref.slice("local:".length)}` : ref;
+// ¿Se puede mostrar ya? (los archivos del HDD exigen sesión iniciada y ticket).
+export const canViewMedia = (ref) => !isLocalRef(ref) || Boolean(ticket);
 
-// Miniatura vía transformaciones de Cloudinary (primer fotograma en vídeo).
+export function resolveMediaUrl(ref) {
+  if (!isLocalRef(ref)) return ref;
+  const url = `${mediaServerUrl()}/media/${ref.slice("local:".length)}`;
+  return ticket ? `${url}?k=${encodeURIComponent(ticket.value)}` : url;
+}
+
+// Pruebas antiguas guardadas en Cloudinary: miniatura vía transformación (solo lectura).
 export function cloudinaryThumb(url, kind) {
   const transform = kind === "video" ? "so_0,w_600,c_limit,q_auto" : "w_600,c_limit,q_auto,f_auto";
   const thumb = url.replace("/upload/", `/upload/${transform}/`);
@@ -131,39 +202,72 @@ export function mediaThumbUrl({ url, thumbUrl, type }) {
 }
 
 /* ---------- Subida ---------- */
-function xhrUpload({ url, body, headers = {}, onProgress }) {
+function xhrUpload({ url, body, headers = {}, onProgress, method = "POST" }) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open("POST", url);
+    xhr.open(method, url);
     Object.entries(headers).forEach(([k, v]) => xhr.setRequestHeader(k, v));
     xhr.upload.onprogress = (e) => e.lengthComputable && onProgress?.(e.loaded / e.total);
     xhr.onload = () => {
       let data = {};
       try { data = JSON.parse(xhr.responseText); } catch {}
       if (xhr.status >= 200 && xhr.status < 300) resolve(data);
-      else reject(new Error(data.error?.message || data.error || `Error al subir (${xhr.status}).`));
+      else reject(Object.assign(new Error(data.error || `Error al subir (${xhr.status}).`), { status: xhr.status, received: data.received }));
     };
-    xhr.onerror = () => reject(new Error(
-      MEDIA_PROVIDER === "local"
-        ? "No se pudo contactar con el servidor de almacenamiento local."
-        : "Sin conexión durante la subida."
-    ));
+    xhr.onerror = () => reject(Object.assign(new Error("No se pudo contactar con el servidor de almacenamiento de Tux."), { network: true }));
     xhr.send(body);
   });
 }
 
-// Comprueba que el servidor local responde y que el disco externo está montado.
-export async function checkMediaServer() {
-  if (MEDIA_PROVIDER !== "local") return { ok: isMediaConfigured() };
+// Archivos grandes: se reserva la subida y se envían trozos de ≤ 48 MB (límite de Cloudflare: 100 MB).
+// Cada trozo se reintenta hasta 3 veces; el servidor indica desde qué byte continuar.
+async function chunkedUpload({ server, file, token, onProgress }) {
+  const auth = { Authorization: `Bearer ${token}` };
+  const res = await fetch(`${server}/api/media/uploads`, {
+    method: "POST",
+    headers: { ...auth, "Content-Type": "application/json" },
+    body: JSON.stringify({ mime: file.type, size: file.size })
+  }).catch(() => null);
+  if (!res) throw new Error("No se pudo contactar con el servidor de almacenamiento de Tux.");
+  const begin = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(begin.error || `Error al subir (${res.status}).`);
+
+  const chunkSize = Math.min(begin.chunkSize || CHUNK_THRESHOLD, CHUNK_THRESHOLD);
+  let offset = 0;
+  let attempts = 0;
+  while (true) {
+    const end = Math.min(offset + chunkSize, file.size);
+    try {
+      const data = await xhrUpload({
+        method: "PUT",
+        url: `${server}/api/media/uploads/${begin.uploadId}?offset=${offset}`,
+        body: file.slice(offset, end),
+        headers: { ...auth, "Content-Type": "application/octet-stream" },
+        onProgress: (p) => onProgress?.((offset + p * (end - offset)) / file.size)
+      });
+      attempts = 0;
+      if (data.done) return data;
+      offset = data.received;
+    } catch (err) {
+      if (++attempts > 3 || !(err.network || err.status === 409)) throw err;
+      if (Number.isInteger(err.received)) offset = err.received;
+      await new Promise((r) => setTimeout(r, 1500 * attempts));
+    }
+  }
+}
+
+// Comprueba que el servidor multimedia responde y que el disco externo está montado.
+// Devuelve también la URL pública del túnel que anuncia el servidor (para el panel /admin).
+export async function checkMediaServer(server = mediaServerUrl()) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 3000);
+  const timer = setTimeout(() => controller.abort(), 5000);
   try {
-    const res = await fetch(`${LOCAL_MEDIA_SERVER}/health`, { signal: controller.signal, cache: "no-store" });
+    const res = await fetch(`${server}/health`, { signal: controller.signal, cache: "no-store" });
     const data = await res.json().catch(() => ({}));
-    if (res.ok && data.ok) return { ok: true };
-    return { ok: false, message: "El disco externo HDD no está conectado al servidor de Tux." };
+    if (res.ok && data.ok) return { ok: true, server, publicUrl: data.publicUrl || "" };
+    return { ok: false, server, message: "El disco externo HDD no está conectado al servidor de Tux." };
   } catch {
-    return { ok: false, message: "El servidor de almacenamiento de Tux no responde. Arráncalo con «npm start» en server/." };
+    return { ok: false, server, message: "El servidor de almacenamiento de Tux no responde (¿Mac mini apagado o túnel caído?)." };
   } finally {
     clearTimeout(timer);
   }
@@ -171,50 +275,39 @@ export async function checkMediaServer() {
 
 // Sube el archivo (y su miniatura si es vídeo). Devuelve { url, thumbUrl } como referencias guardables.
 export async function uploadMedia({ file, kind, user, thumbBlob, onProgress }) {
-  if (MEDIA_PROVIDER === "local") {
-    const token = await user.getIdToken();
-    const main = await xhrUpload({
-      url: `${LOCAL_MEDIA_SERVER}/api/media`,
-      body: file,
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": file.type, "X-Tux-Role": "main" },
-      onProgress
-    });
-    let thumbUrl = kind === "image" ? main.key : "";
-    if (kind === "video" && thumbBlob) {
-      const thumb = await xhrUpload({
-        url: `${LOCAL_MEDIA_SERVER}/api/media`,
-        body: thumbBlob,
-        headers: {
-          Authorization: `Bearer ${token}`, "Content-Type": "image/jpeg",
-          "X-Tux-Role": "thumb", "X-Tux-Media-Id": main.id
-        }
-      }).catch(() => null);
-      thumbUrl = thumb?.key || "";
-    }
-    return { url: main.key, thumbUrl };
+  const server = mediaServerUrl();
+  const token = await user.getIdToken();
+  const main = file.size > CHUNK_THRESHOLD
+    ? await chunkedUpload({ server, file, token, onProgress })
+    : await xhrUpload({
+        url: `${server}/api/media`,
+        body: file,
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": file.type, "X-Tux-Role": "main" },
+        onProgress
+      });
+  let thumbUrl = kind === "image" ? main.key : "";
+  if (kind === "video" && thumbBlob) {
+    const thumb = await xhrUpload({
+      url: `${server}/api/media`,
+      body: thumbBlob,
+      headers: {
+        Authorization: `Bearer ${token}`, "Content-Type": "image/jpeg",
+        "X-Tux-Role": "thumb", "X-Tux-Media-Id": main.id
+      }
+    }).catch(() => null);
+    thumbUrl = thumb?.key || "";
   }
-
-  if (!isMediaConfigured()) throw new Error("La subida de archivos aún no está configurada (Cloudinary).");
-  const form = new FormData();
-  form.append("file", file);
-  form.append("upload_preset", CLOUDINARY.uploadPreset);
-  form.append("folder", `Tux/proofs/${user.uid}`);
-  const data = await xhrUpload({
-    url: `https://api.cloudinary.com/v1_1/${CLOUDINARY.cloudName}/${kind}/upload`,
-    body: form,
-    onProgress
-  });
-  return { url: data.secure_url, thumbUrl: cloudinaryThumb(data.secure_url, kind) };
+  return { url: main.key, thumbUrl };
 }
 
 // Borra físicamente un archivo del HDD a través del servidor (el propio dueño o un admin).
-// Las referencias de Cloudinary no se pueden borrar sin firma: se ignoran.
+// Las referencias antiguas de Cloudinary no se pueden borrar sin firma: se ignoran.
 export async function deleteMediaRef(ref, user) {
   if (!isLocalRef(ref)) return false;
   const token = await user.getIdToken();
   let res;
   try {
-    res = await fetch(`${LOCAL_MEDIA_SERVER}/api/media/${ref.slice("local:".length)}`, {
+    res = await fetch(`${mediaServerUrl()}/api/media/${ref.slice("local:".length)}`, {
       method: "DELETE",
       headers: { Authorization: `Bearer ${token}` }
     });
@@ -251,11 +344,41 @@ export async function createProof({ user, authorName, activity, upload, kind, is
 // Contenido 360° de la comunidad (filtro de igualdad simple: sin índice compuesto).
 export function watchVrProofs(callback, onError) {
   const q = query(collection(db, "proofs"), where("is360", "==", true), limit(120));
-  return onSnapshot(q, (snap) => {
-    const items = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-    items.sort((a, b) => (b.createdAt?.toMillis?.() || 0) - (a.createdAt?.toMillis?.() || 0));
-    callback(items);
-  }, onError);
+  return onSnapshot(q, (snap) => callback(proofsFrom(snap)), onError);
+}
+
+const proofsFrom = (snap) => {
+  const items = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+  items.sort((a, b) => (b.createdAt?.toMillis?.() || 0) - (a.createdAt?.toMillis?.() || 0));
+  return items;
+};
+
+// Pruebas de un usuario (perfil público). Igualdad simple + orden en cliente: sin índice compuesto.
+export const watchUserProofs = (uid, callback, onError) =>
+  onSnapshot(query(collection(db, "proofs"), where("uid", "==", uid), limit(200)),
+    (snap) => callback(proofsFrom(snap)), onError);
+
+// Feed «Descubrir»: las pruebas más recientes de toda la comunidad.
+export const watchRecentProofs = (callback, onError) =>
+  onSnapshot(query(collection(db, "proofs"), orderBy("createdAt", "desc"), limit(60)),
+    (snap) => callback(proofsFrom(snap)), onError);
+
+// Feed «Siguiendo»: pruebas de una lista de usuarios (consultas "in" de 30 en 30).
+export function watchProofsByAuthors(uids, callback, onError) {
+  const groups = [];
+  for (let i = 0; i < uids.length; i += 30) groups.push(uids.slice(i, i + 30));
+  if (!groups.length) {
+    callback([]);
+    return () => {};
+  }
+  const results = groups.map(() => []);
+  const unsubs = groups.map((group, i) =>
+    onSnapshot(query(collection(db, "proofs"), where("uid", "in", group), limit(60)), (snap) => {
+      results[i] = proofsFrom(snap);
+      callback([].concat(...results)
+        .sort((a, b) => (b.createdAt?.toMillis?.() || 0) - (a.createdAt?.toMillis?.() || 0)).slice(0, 80));
+    }, onError));
+  return () => unsubs.forEach((u) => u());
 }
 
 // Muestras 360° públicas (CORS abierto) para que la galería no arranque vacía.

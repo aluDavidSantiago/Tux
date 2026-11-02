@@ -6,13 +6,16 @@ import { isEquirectangular } from "../../src/media.js";
 
 let session = null;
 let token = 0;
-let modal, stage, soundBtn, loading;
+let modal, stage, soundBtn, loading, actionsBox;
 
 export function initViewer() {
   modal = $("#viewer-modal");
   stage = $("#viewer-stage");
   soundBtn = $("#viewer-sound");
   loading = $("#viewer-loading");
+  // Acciones opcionales sobre el contenido (ver perfil del autor, responder…).
+  actionsBox = h("div", { class: "viewer-actions" });
+  soundBtn.before(actionsBox);
   modal.addEventListener("close", () => {
     token++;
     session?.destroy();
@@ -52,13 +55,21 @@ function probeRemote(url, type) {
   });
 }
 
-export async function openViewer({ url, type = "image", is360 = false, title = "", sub = "" }) {
+// actions: [{ icon, label, onClick }] — botones bajo el título (el visor se cierra al pulsarlos).
+export async function openViewer({ url, type = "image", is360 = false, title = "", sub = "", actions = [] }) {
   const current = ++token;
   session?.destroy();
   session = null;
   stage.replaceChildren();
   $("#viewer-title").textContent = title;
   $("#viewer-sub").textContent = sub;
+  actionsBox.replaceChildren(...actions.map((a) => h("button", {
+    class: "viewer-action", type: "button",
+    onclick: () => {
+      closeModal(modal);
+      a.onClick();
+    }
+  }, svgUse(a.icon), a.label)));
   $("#viewer-badge").hidden = true;
   soundBtn.hidden = type !== "video";
   setSoundIcon(true);

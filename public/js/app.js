@@ -1,5 +1,5 @@
-// Tux · orquestador de la interfaz: Panel (actividad estrella), Mis planes, Galería VR,
-// Ajustes, feed de exploración, autenticación y modales.
+// Tux · orquestador de la interfaz: Panel (actividad estrella), Mis planes, Galería VR, Comunidad
+// (publicaciones, perfiles y seguidores), mensajes, Ajustes, feed de exploración y modales.
 import {
   CATEGORIES, BUDGETS, EFFORTS, WHEN, DURATIONS, SAMPLE_ACTIVITIES,
   watchActivities, getActivity, getActivitiesByAuthor, createActivity, deleteActivity,
@@ -9,10 +9,14 @@ import {
   signInWithGoogle, completeRedirectSignIn, signInWithEmail, signUpWithEmail, resetPassword, logOut,
   watchSession, authErrorMessage
 } from "../../src/auth.js";
-import { AVATAR_COLORS, ensureUserProfile, watchUserProfile, updateUserProfile } from "../../src/users.js";
 import {
-  watchLikes, watchSaved, setLike, setSaved, watchComments, addComment, deleteComment
+  AVATAR_COLORS, ensureUserProfile, watchUserProfile, updateUserProfile, getPublicProfile, rememberProfile, searchUsers
+} from "../../src/users.js";
+import {
+  watchLikes, watchSaved, setLike, setSaved, watchComments, addComment, deleteComment,
+  setFollow, watchFollowing, listFollows
 } from "../../src/social.js";
+import { MESSAGE_MAX, chatIdFor, otherMember, isUnread, watchChats, watchMessages, sendMessage, markChatRead } from "../../src/chat.js";
 import {
   FREQUENCIES, DISCARD_REASONS, normalizePrefs, savePrefs, saveStar, watchHistory, setHistory, restoreFromTrash,
   removeProofFromHistory
@@ -20,8 +24,11 @@ import {
 import { currentPeriod, msUntilNextPeriod, pickStar, scoreActivity } from "../../src/recommendations.js";
 import {
   ACCEPT_ATTR, LIMITS_LABEL, validateFile, probeMedia, isEquirectangular, detectSphericalMetadata, uploadMedia,
-  checkMediaServer, resolveMediaUrl, mediaThumbUrl, createProof, deleteMediaRef, deleteProofDoc, watchVrProofs, SAMPLE_VR
+  checkMediaServer, resolveMediaUrl, mediaThumbUrl, createProof, deleteMediaRef, deleteProofDoc, watchVrProofs, SAMPLE_VR,
+  startMediaSession, stopMediaSession, onMediaAccessChange, canViewMedia, watchUserProofs, watchRecentProofs,
+  watchProofsByAuthors
 } from "../../src/media.js";
+import { mediaServerUrl, mediaServerSource } from "../../src/mediaConfig.js";
 import { NOTIFICATION_KINDS, watchNotifications, markAllRead, deleteNotification } from "../../src/notifications.js";
 import { isAdminUser } from "../../src/admin.js";
 import {
@@ -30,7 +37,7 @@ import {
 } from "./ui.js";
 import { initViewer, openViewer } from "./viewer.js";
 
-export const APP_VERSION = "1.1.0-beta";
+export const APP_VERSION = "1.2.0-beta";
 
 /* ==========================================================
    Estado
@@ -50,6 +57,9 @@ const state = {
   vr: [],
   isAdmin: false,
   notifications: [],
+  following: new Set(),     // uids a los que sigo
+  chats: [],
+  social: { tab: "discover", recent: null, followed: null },
   filters: { budget: new Set(), effort: new Set(), category: new Set(), when: new Set(), search: "" },
   view: "dashboard",
   plansTab: "accepted",
@@ -252,10 +262,15 @@ watchSession((user) => {
   sessionUnsubs = [];
   Object.assign(state, {
     user, profile: null, profileLoaded: false, history: new Map(), historyLoaded: false, guestStar: null,
-    liked: new Set(), saved: [], myPlans: [], isAdmin: false, notifications: []
+    liked: new Set(), saved: [], myPlans: [], isAdmin: false, notifications: [], following: new Set(), chats: []
   });
+  state.social.followed = null;
+  followedFeedUnsub?.();
+  followedFeedUnsub = null;
+  followedFeedKey = null;
 
   if (user) {
+    startMediaSession(user);
     ensureUserProfile(user).catch((err) => console.warn("Tux: perfil no creado.", err));
     sessionUnsubs.push(
       watchUserProfile(user.uid, (profile) => {
@@ -280,6 +295,18 @@ watchSession((user) => {
         state.notifications = items;
         renderBell();
         if (notificationsModal.open) renderNotifications();
+      }),
+      watchFollowing(user.uid, (uids) => {
+        state.following = new Set(uids);
+        syncFollowedFeed();
+        refreshFollowButtons();
+        if (state.view === "social") renderSocial();
+      }),
+      watchChats(user.uid, (chats) => {
+        state.chats = chats;
+        renderChatBadge();
+        if (inboxModal.open) renderInbox();
+        if (chatCtx && chatModal.open) markOpenChatRead();
       })
     );
     isAdminUser(user.uid).then((value) => {
@@ -288,11 +315,14 @@ watchSession((user) => {
       onDataChange();
     });
     loadMyPlans();
-  } else if (state.view === "plans") {
-    setView("dashboard");
+  } else {
+    stopMediaSession();
+    [chatModal, inboxModal].forEach(closeModal);
+    if (state.view === "plans") setView("dashboard");
   }
   renderFeed(true);
   renderBell();
+  renderChatBadge();
   onDataChange();
 });
 
@@ -386,7 +416,10 @@ function buildCard(a) {
       h("h2", { class: "card-title", text: a.title }),
       a.description && h("p", { class: "card-desc", text: a.description }),
       metaRow(a, "card-meta"),
-      h("p", { class: "card-author" }, "por ", h("b", { text: `@${a.authorName || "Tux"}` }),
+      h("p", { class: "card-author" }, "por ",
+        a.authorId && !a.sample
+          ? h("button", { class: "author-link", type: "button", onclick: () => openUserProfile(a.authorId) }, `@${a.authorName || "Tux"}`)
+          : h("b", { text: `@${a.authorName || "Tux"}` }),
         a.createdAt ? ` · ${timeAgo(a.createdAt)}` : "")
     ),
     h("div", { class: "card-rail" },
@@ -689,7 +722,7 @@ $("#filters-clear").addEventListener("click", clearFilters);
 /* ==========================================================
    Navegación
    ========================================================== */
-const VIEWS = ["dashboard", "plans", "vr", "settings", "feed"];
+const VIEWS = ["dashboard", "plans", "vr", "social", "settings", "feed"];
 
 function setView(view) {
   if (!VIEWS.includes(view)) return;
@@ -726,9 +759,17 @@ $(".tabbar").addEventListener("click", (e) => {
 
 // Renderiza la vista activa solo si cambió algo relevante (evita parpadeos en tiempo real).
 function renderActiveView() {
-  const renderers = { dashboard: renderDashboard, plans: renderPlans, vr: renderVr, settings: renderSettings };
+  const renderers = { dashboard: renderDashboard, plans: renderPlans, vr: renderVr, social: renderSocial, settings: renderSettings };
   renderers[state.view]?.();
 }
+
+// Llega (o cambia) el ticket de lectura del HDD o la URL del servidor: se repintan las miniaturas.
+onMediaAccessChange(() => {
+  Object.keys(renderSig).forEach((key) => delete renderSig[key]);
+  renderActiveView();
+  if (profileModal.open) renderProfile();
+  if (chatCtx && chatModal.open) renderMessages();
+});
 
 function memo(view, sig) {
   if (renderSig[view] === sig) return false;
@@ -803,45 +844,269 @@ async function loadMyPlans() {
 
 const profileModal = $("#profile-modal");
 
+// Perfil abierto (propio o de otro usuario). Se escucha en tiempo real mientras la hoja está abierta.
+let profileView = null; // { uid, profile, proofs, plans, tab, list, unsubs }
+
+const PROFILE_TABS = [
+  { id: "proofs", label: "Pruebas" },
+  { id: "vr", label: "360° / VR" },
+  { id: "plans", label: "Planes" },
+  { id: "activity", label: "Actividad" }
+];
+
 function openProfile() {
-  renderProfile();
-  openModal(profileModal);
-  loadMyPlans();
+  openUserProfile(state.user.uid);
 }
 
-const stat = (value, label) => h("div", { class: "stat" }, h("b", { text: value }), h("span", { text: label }));
+function openUserProfile(uid) {
+  if (!uid) return;
+  if (profileView?.uid !== uid) {
+    profileView?.unsubs.forEach((u) => u());
+    profileView = { uid, profile: null, proofs: null, plans: null, tab: "proofs", list: null, unsubs: [] };
+    const own = uid === state.user?.uid;
+    profileView.unsubs.push(
+      watchUserProfile(uid, (profile) => {
+        if (profileView?.uid !== uid) return;
+        profileView.profile = profile;
+        rememberProfile(uid, profile);
+        renderProfile();
+      }),
+      watchUserProofs(uid, (proofs) => {
+        if (profileView?.uid !== uid) return;
+        profileView.proofs = proofs;
+        renderProfile();
+      }, (err) => console.warn("Tux: no se pudieron cargar las pruebas del perfil.", err))
+    );
+    if (own) {
+      loadMyPlans();
+    } else {
+      getActivitiesByAuthor(uid)
+        .then((plans) => {
+          if (profileView?.uid !== uid) return;
+          plans.forEach((a) => cache.set(a.id, a));
+          profileView.plans = plans;
+          renderProfile();
+        })
+        .catch(() => profileView?.uid === uid && (profileView.plans = []));
+    }
+  } else {
+    profileView.list = null;
+  }
+  renderProfile();
+  openModal(profileModal);
+}
+
+profileModal.addEventListener("close", () => {
+  profileView?.unsubs.forEach((u) => u());
+  profileView = null;
+});
+
+const stat = (value, label, onclick) => onclick
+  ? h("button", { class: "stat", type: "button", onclick }, h("b", { text: value }), h("span", { text: label }))
+  : h("div", { class: "stat" }, h("b", { text: value }), h("span", { text: label }));
+
+// Avatar pequeño de cualquier usuario: inicial al momento y foto/color cuando llega su perfil.
+function miniAvatar(uid, name = "", cls = "") {
+  const el = h("span", { class: `mini-avatar ${cls}`, dataset: { color: "orange" }, text: (name || "?").charAt(0) });
+  getPublicProfile(uid).then((p) => {
+    if (!p) return;
+    el.dataset.color = AVATAR_COLORS.includes(p.avatarColor) ? p.avatarColor : "orange";
+    el.replaceChildren(p.photoURL
+      ? h("img", { src: p.photoURL, alt: "", referrerpolicy: "no-referrer", loading: "lazy" })
+      : tuxLogo("avatar-tux"));
+  });
+  return el;
+}
+
+function followButton(uid, { small = false } = {}) {
+  if (!uid || uid === state.user?.uid) return null;
+  const btn = h("button", {
+    class: `follow-btn${small ? " small" : ""}`, type: "button", dataset: { followUid: uid },
+    onclick: (e) => {
+      e.stopPropagation();
+      toggleFollow(uid);
+    }
+  });
+  syncFollowButton(btn);
+  return btn;
+}
+
+function syncFollowButton(btn) {
+  const on = state.following.has(btn.dataset.followUid);
+  btn.classList.toggle("is-on", on);
+  btn.textContent = on ? "Siguiendo" : "Seguir";
+  btn.setAttribute("aria-pressed", String(on));
+}
+
+const refreshFollowButtons = () => $$("[data-follow-uid]").forEach(syncFollowButton);
+
+// Los contadores se actualizan solos: Firestore refleja al instante las escrituras locales.
+async function toggleFollow(uid) {
+  if (!requireAuth()) return;
+  const on = !state.following.has(uid);
+  on ? state.following.add(uid) : state.following.delete(uid);
+  refreshFollowButtons();
+  try {
+    await setFollow(state.user.uid, uid, on);
+  } catch (err) {
+    console.error(err);
+    on ? state.following.delete(uid) : state.following.add(uid);
+    refreshFollowButtons();
+    toast("No se pudo actualizar el seguimiento.");
+  }
+}
 
 function renderProfile() {
   const root = $("#profile-content");
-  if (!state.user) return root.replaceChildren();
-  const p = state.profile || {};
+  const view = profileView;
+  if (!view) return root.replaceChildren();
+  const own = view.uid === state.user?.uid;
+  const p = (own ? state.profile : view.profile) || view.profile || {};
+  const proofs = view.proofs || [];
+  const plans = own ? state.myPlans : view.plans || [];
   const since = millis(p.createdAt)
     ? new Date(millis(p.createdAt)).toLocaleDateString("es", { month: "long", year: "numeric" })
     : null;
-  const grid = h("div", { class: "tile-grid" });
+  const name = p.nickname || (own ? state.user.displayName : "") || "Pingüino";
+
+  const actions = own
+    ? h("div", { class: "profile-actions" },
+        h("button", { class: "profile-edit", type: "button", onclick: openEditProfile }, "Editar perfil"))
+    : h("div", { class: "profile-actions" },
+        followButton(view.uid),
+        h("button", {
+          class: "profile-edit", type: "button",
+          onclick: () => openChat(view.uid)
+        }, svgUse("i-chat"), "Mensaje"));
+
+  const showList = (kind) => {
+    view.list = { kind, uids: null };
+    renderProfile();
+    listFollows(view.uid, kind)
+      .then((uids) => {
+        if (profileView !== view || view.list?.kind !== kind) return;
+        view.list.uids = uids;
+        renderProfile();
+      })
+      .catch(() => toast("No se pudo cargar la lista."));
+  };
+
   root.replaceChildren(
     h("div", { class: "profile-head" },
-      avatarElement(p, { interactive: true }),
-      h("h1", { class: "profile-name", text: p.nickname || state.user.displayName || "Pingüino" }),
+      own ? avatarElement(p, { interactive: true }) : avatarElement(p),
+      h("h1", { class: "profile-name", text: name }),
       p.bio && h("p", { class: "profile-bio", text: p.bio }),
       since && h("p", { class: "profile-since", text: `En Tux desde ${since}` }),
-      h("button", { class: "profile-edit", type: "button", onclick: openEditProfile }, "Editar perfil")
+      actions
     ),
-    h("div", { class: "stats" },
-      stat(historyOf("completed").length, "Completados"),
-      stat(state.myPlans.length, "Publicados"),
-      stat(state.saved.length, "Guardados")
+    h("div", { class: "stats four" },
+      stat(formatCount(p.followersCount || 0), "Seguidores", () => showList("followers")),
+      stat(formatCount(p.followingCount || 0), "Siguiendo", () => showList("following")),
+      stat(proofs.length, "Pruebas"),
+      stat(plans.length, "Planes")
     ),
-    h("h2", { class: "section-title", text: "Tus publicaciones" }),
-    grid
+    view.list ? followList(view) : profileTabs(view, { own, proofs, plans })
   );
-  if (!state.myPlans.length) {
-    grid.append(h("p", { class: "tile-empty", text: "Aún no has publicado planes. Comparte el primero desde el Panel." }));
+}
+
+function profileTabs(view, { own, proofs, plans }) {
+  const vr = proofs.filter((x) => x.is360);
+  const counts = { proofs: proofs.length, vr: vr.length, plans: plans.length };
+  const tabs = h("div", { class: "tab-chips", role: "tablist" },
+    PROFILE_TABS.map((t) => h("button", {
+      type: "button", role: "tab", class: `tab-chip${t.id === view.tab ? " is-active" : ""}`,
+      "aria-selected": String(t.id === view.tab),
+      onclick: () => { view.tab = t.id; renderProfile(); }
+    }, t.label, t.id in counts && h("span", { class: "tab-count", text: counts[t.id] })))
+  );
+  const grid = h("div", { class: "tile-grid" });
+  const empty = (text) => grid.append(h("p", { class: "tile-empty", text }));
+
+  if (view.proofs === null && view.tab !== "plans") {
+    grid.append(h("p", { class: "tile-empty" }, tuxLogo("empty-mark loading-mark")));
+  } else if (view.tab === "proofs" || view.tab === "vr") {
+    const list = view.tab === "vr" ? vr : proofs;
+    if (!list.length) {
+      empty(view.tab === "vr"
+        ? (own ? "Aún no has compartido nada en 360°." : "Todavía no tiene contenido 360°.")
+        : (own ? "Completa tu actividad estrella con una foto o vídeo y aparecerá aquí." : "Todavía no ha completado planes con prueba."));
+    } else {
+      grid.append(...list.map(proofTile));
+    }
+  } else if (view.tab === "plans") {
+    if (!plans.length) empty(own ? "Aún no has publicado planes. Comparte el primero desde el Panel." : "No ha publicado planes todavía.");
+    else {
+      grid.append(...plans.map((a) =>
+        h("button", { class: "tile", type: "button", "aria-label": a.title, onclick: () => openPlan(a.id) },
+          placeholder(a), mediaImage(a.imageUrl) || "", h("span", { class: "tile-title", text: a.title }))));
+    }
   } else {
-    grid.append(...state.myPlans.map((a) =>
-      h("button", { class: "tile", type: "button", "aria-label": a.title, onclick: () => openPlan(a.id) },
-        placeholder(a), mediaImage(a.imageUrl) || "", h("span", { class: "tile-title", text: a.title }))));
+    return h("div", {}, tabs, activityList(proofs, plans));
   }
+  return h("div", {}, tabs, grid);
+}
+
+// Miniatura de una prueba en la rejilla del perfil (los archivos del HDD requieren sesión).
+function proofTile(proof) {
+  const src = canViewMedia(proof.url) ? mediaThumbUrl(proof) : "";
+  return h("button", {
+    class: "tile", type: "button", "aria-label": proof.activityTitle,
+    onclick: () => openProof(proof)
+  },
+    src ? h("img", { src, alt: "", loading: "lazy" }) : h("span", { class: "tile-locked" }, svgUse(state.user ? "i-image" : "i-lock")),
+    (proof.is360 || proof.type === "video") && h("span", { class: "tile-mark" },
+      proof.is360 ? svgUse("i-orbit") : svgUse("i-play")),
+    h("span", { class: "tile-title", text: proof.activityTitle })
+  );
+}
+
+// Actividad: pruebas completadas y planes publicados, en orden cronológico.
+function activityList(proofs, plans) {
+  const items = [
+    ...proofs.map((x) => ({ at: millis(x.createdAt), kind: "proof", item: x })),
+    ...plans.map((a) => ({ at: millis(a.createdAt), kind: "plan", item: a }))
+  ].sort((a, b) => b.at - a.at).slice(0, 40);
+  if (!items.length) return h("p", { class: "list-empty", text: "Sin actividad todavía." });
+  return h("ul", { class: "activity-list" }, items.map(({ kind, item }) => h("li", {},
+    h("button", {
+      class: "activity-row", type: "button",
+      onclick: () => (kind === "proof" ? openProof(item) : openPlan(item.id))
+    },
+      h("span", { class: "activity-icon" }, svgUse(kind === "plan" ? "i-plus" : item.is360 ? "i-orbit" : "i-check")),
+      h("span", { class: "plan-text" },
+        h("b", { text: kind === "plan" ? `Publicó «${item.title}»` : `Completó «${item.activityTitle}»` }),
+        h("small", { text: [kind === "proof" && item.is360 ? "Prueba 360°" : kind === "proof" ? (item.type === "video" ? "Vídeo" : "Foto") : "Plan nuevo", timeAgo(item.createdAt)].join(" · ") })
+      )
+    )
+  )));
+}
+
+function followList(view) {
+  const { kind, uids } = view.list;
+  const head = h("div", { class: "list-head" },
+    h("button", { class: "icon-action", type: "button", "aria-label": "Volver", onclick: () => { view.list = null; renderProfile(); } }, svgUse("i-back")),
+    h("b", { text: kind === "followers" ? "Seguidores" : "Siguiendo" })
+  );
+  if (!uids) return h("div", {}, head, h("p", { class: "list-empty" }, tuxLogo("empty-mark loading-mark")));
+  if (!uids.length) return h("div", {}, head, h("p", { class: "list-empty", text: kind === "followers" ? "Aún no tiene seguidores." : "Aún no sigue a nadie." }));
+  return h("div", {}, head, h("ul", { class: "plan-list" }, uids.map((uid) => userRow(uid))));
+}
+
+// Fila de usuario (listas de seguidores y búsqueda): avatar, nombre, bio y botón Seguir.
+function userRow(uid, known = null) {
+  const name = h("b", { text: known?.nickname || "…" });
+  const bio = h("small", { text: known?.bio || "" });
+  if (!known) getPublicProfile(uid).then((p) => {
+    name.textContent = p?.nickname || "Pingüino";
+    bio.textContent = p?.bio || "";
+  });
+  return h("li", { class: "plan-row user-row" },
+    h("button", { class: "plan-row-main", type: "button", onclick: () => openUserProfile(uid) },
+      miniAvatar(uid, known?.nickname, "md"),
+      h("span", { class: "plan-text" }, name, bio)
+    ),
+    followButton(uid, { small: true })
+  );
 }
 
 /* ==========================================================
@@ -1228,14 +1493,14 @@ watchVrProofs((items) => {
 }, (err) => console.warn("Tux: no se pudo cargar la galería VR.", err));
 
 function vrTile(item) {
+  const visible = canViewMedia(item.url);
   return h("button", {
     class: "vr-tile", type: "button", "aria-label": `Ver ${item.activityTitle} en 360°`,
-    onclick: () => openViewer({
-      url: resolveMediaUrl(item.url), type: item.type, is360: true, title: item.activityTitle,
-      sub: [`por @${item.authorName}`, item.caption].filter(Boolean).join(" · ")
-    })
+    onclick: () => openProof({ ...item, is360: true })
   },
-    h("img", { src: mediaThumbUrl(item) || resolveMediaUrl(item.url), alt: "", loading: "lazy" }),
+    visible
+      ? h("img", { src: mediaThumbUrl(item) || resolveMediaUrl(item.url), alt: "", loading: "lazy" })
+      : h("span", { class: "tile-locked" }, svgUse(state.user ? "i-orbit" : "i-lock")),
     h("span", { class: "badge-360" }, svgUse("i-orbit"), item.type === "video" ? "Vídeo 360°" : "360°"),
     h("span", { class: "vr-tile-info" },
       h("b", { text: item.activityTitle }),
@@ -1245,7 +1510,7 @@ function vrTile(item) {
 }
 
 function renderVr() {
-  if (!memo("vr", JSON.stringify(state.vr.map((v) => v.id)))) return;
+  if (!memo("vr", JSON.stringify([state.vr.map((v) => v.id), state.user?.uid]))) return;
   const community = state.vr;
   $("#vr").replaceChildren(
     h("header", { class: "page-head" },
@@ -1265,6 +1530,183 @@ function renderVr() {
     community.length < 4 && h("h3", { class: "eyebrow vr-section-title", text: "Muestras de Tux" }),
     community.length < 4 && h("div", { class: "vr-grid" }, SAMPLE_VR.map(vrTile))
   );
+}
+
+/* ==========================================================
+   Publicaciones (pruebas servidas desde el HDD) y visor
+   ========================================================== */
+const LOCAL_IMAGE_REF = /^local:users\/[A-Za-z0-9]+\/[0-9a-f-]{36}(\.thumb)?\.(jpg|png)$/;
+
+// Abre una prueba en el visor (360° inmersivo si procede) con acceso al autor y a responderle.
+function openProof(proof) {
+  if (!canViewMedia(proof.url)) {
+    if (!state.user) return requireAuth(() => openProof(proof));
+    return toast("Conectando con el almacenamiento de Tux… inténtalo en unos segundos.");
+  }
+  const own = proof.uid === state.user?.uid;
+  openViewer({
+    url: resolveMediaUrl(proof.url), type: proof.type, is360: proof.is360, title: proof.activityTitle,
+    sub: [`por @${proof.authorName}`, proof.caption].filter(Boolean).join(" · "),
+    actions: proof.uid && !proof.sample
+      ? [
+          { icon: "i-user", label: own ? "Tu perfil" : `@${proof.authorName}`, onClick: () => openUserProfile(proof.uid) },
+          !own && { icon: "i-reply", label: "Responder", onClick: () => replyToProof(proof) }
+        ].filter(Boolean)
+      : []
+  });
+}
+
+function replyToProof(proof) {
+  const thumb = [proof.thumbUrl, proof.url].find((ref) => LOCAL_IMAGE_REF.test(ref || "")) || "";
+  openChat(proof.uid, { replyTo: { proofId: proof.id, title: proof.activityTitle, thumb } });
+}
+
+function postCard(proof) {
+  const own = proof.uid === state.user?.uid;
+  const visible = canViewMedia(proof.url);
+  const src = visible ? mediaThumbUrl(proof) : "";
+  const fallback = () => h("span", { class: "post-locked" },
+    svgUse(!visible ? "i-lock" : proof.type === "video" ? "i-play" : "i-image"),
+    !visible ? (state.user ? "Conectando con el HDD de Tux…" : "Inicia sesión para ver las pruebas") : "");
+  const media = h("button", {
+    class: "post-media", type: "button", "aria-label": `Ver ${proof.activityTitle}`, onclick: () => openProof(proof)
+  },
+    src ? h("img", { src, alt: "", loading: "lazy", onerror: (e) => e.currentTarget.replaceWith(fallback()) }) : fallback(),
+    h("span", { class: "post-badges" },
+      proof.is360 && h("span", { class: "badge-360" }, svgUse("i-orbit"), "360°"),
+      proof.type === "video" && h("span", { class: "badge-360" }, svgUse("i-play"), "Vídeo"))
+  );
+  return h("article", { class: "post" },
+    h("header", { class: "post-head" },
+      h("button", { class: "post-author", type: "button", onclick: () => openUserProfile(proof.uid) },
+        miniAvatar(proof.uid, proof.authorName),
+        h("span", {}, h("b", { text: `@${proof.authorName}` }), h("small", { text: timeAgo(proof.createdAt) }))
+      ),
+      !own && followButton(proof.uid, { small: true })
+    ),
+    media,
+    h("div", { class: "post-body" },
+      h("b", { text: proof.activityTitle }),
+      proof.caption && h("p", { text: proof.caption })
+    ),
+    h("div", { class: "post-actions" },
+      h("button", { class: "ghost-btn small", type: "button", onclick: () => openProof(proof) },
+        svgUse(proof.is360 ? "i-orbit" : "i-image"), proof.is360 ? "Ver en 360°" : "Ver"),
+      !own && h("button", { class: "ghost-btn small accent", type: "button", onclick: () => replyToProof(proof) },
+        svgUse("i-reply"), "Responder")
+    )
+  );
+}
+
+/* ==========================================================
+   Vista: Comunidad (feed social, búsqueda de usuarios)
+   ========================================================== */
+let recentFeedUnsub = null;
+let followedFeedUnsub = null;
+let followedFeedKey = null;
+
+function ensureRecentFeed() {
+  if (recentFeedUnsub) return;
+  recentFeedUnsub = watchRecentProofs((items) => {
+    state.social.recent = items;
+    if (state.view === "social") renderSocial();
+  }, (err) => {
+    console.warn("Tux: no se pudo cargar el feed de la comunidad.", err);
+    state.social.recent = [];
+    if (state.view === "social") renderSocial();
+  });
+}
+
+// El feed «Siguiendo» se vuelve a suscribir cuando cambia la lista de seguidos.
+function syncFollowedFeed() {
+  const uids = [...state.following].sort();
+  const key = uids.join(",");
+  if (key === followedFeedKey) return;
+  followedFeedKey = key;
+  followedFeedUnsub?.();
+  state.social.followed = null;
+  followedFeedUnsub = watchProofsByAuthors(uids, (items) => {
+    state.social.followed = items;
+    if (state.view === "social") renderSocial();
+  }, (err) => console.warn("Tux: no se pudo cargar el feed de seguidos.", err));
+}
+
+const SOCIAL_TABS = [["discover", "Descubrir"], ["following", "Siguiendo"]];
+
+function buildSocialSkeleton(root) {
+  let searchTimer;
+  const results = h("ul", { class: "plan-list social-results", id: "social-results" });
+  const input = h("input", {
+    type: "search", id: "social-search", placeholder: "Buscar pingüinos por nickname", autocomplete: "off",
+    oninput: () => {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(async () => {
+        const text = input.value;
+        try {
+          const users = (await searchUsers(text)).filter((u) => u.uid !== state.user?.uid);
+          if (input.value !== text) return;
+          results.replaceChildren(...(text.trim() && !users.length
+            ? [h("li", { class: "tile-empty", text: "Nadie con ese nickname." })]
+            : users.map((u) => userRow(u.uid, u))));
+        } catch (err) {
+          console.error(err);
+          toast("No se pudo buscar.");
+        }
+      }, 250);
+    }
+  });
+  const tabs = h("div", { class: "segmented", id: "social-tabs", role: "tablist" },
+    SOCIAL_TABS.map(([id, label]) => h("button", {
+      type: "button", role: "tab", dataset: { socialTab: id },
+      onclick: () => {
+        state.social.tab = id;
+        renderSocial();
+      }
+    }, label)),
+    h("span", { class: "segmented-thumb" })
+  );
+  root.replaceChildren(
+    h("header", { class: "page-head" },
+      h("h1", { class: "page-title", text: "Comunidad" }),
+      h("p", { class: "page-sub", text: "Las pruebas de quien sigues y de todo Tux, servidas desde el disco de Tux. Responde por mensaje privado." })
+    ),
+    h("label", { class: "search-field" }, svgUse("i-search"), input),
+    results,
+    tabs,
+    h("div", { class: "post-list", id: "social-feed" })
+  );
+}
+
+function renderSocial() {
+  const root = $("#social");
+  if (!$("#social-feed", root)) buildSocialSkeleton(root);
+  ensureRecentFeed();
+  const tab = state.social.tab;
+  $$("[data-social-tab]", root).forEach((btn, i) => {
+    const active = btn.dataset.socialTab === tab;
+    btn.classList.toggle("is-active", active);
+    btn.setAttribute("aria-selected", String(active));
+    if (active) setThumb($("#social-tabs", root), i);
+  });
+  const items = tab === "following" ? state.social.followed : state.social.recent;
+  if (!memo("social", JSON.stringify([tab, state.user?.uid, state.following.size, items?.map((p) => p.id)]))) return;
+
+  const feedEl = $("#social-feed", root);
+  const empty = (text, action) => feedEl.replaceChildren(h("div", { class: "list-empty" }, tuxLogo("empty-mark"), h("p", { text }), action));
+  if (tab === "following" && !state.user) {
+    return empty("Inicia sesión para seguir a otros pingüinos y ver aquí sus pruebas.",
+      h("button", { class: "primary-btn", type: "button", style: "margin-top:16px", onclick: () => requireAuth() }, "Iniciar sesión"));
+  }
+  if (tab === "following" && !state.following.size) {
+    return empty("Aún no sigues a nadie. Busca a alguien arriba o pulsa «Seguir» en Descubrir.");
+  }
+  if (!items) return feedEl.replaceChildren(h("div", { class: "list-empty" }, tuxLogo("empty-mark loading-mark")));
+  if (!items.length) {
+    return empty(tab === "following"
+      ? "La gente que sigues todavía no ha publicado pruebas."
+      : "Todavía no hay pruebas en la comunidad. ¡Completa tu actividad estrella y estrena el feed!");
+  }
+  feedEl.replaceChildren(...items.map(postCard));
 }
 
 /* ==========================================================
@@ -1294,7 +1736,7 @@ function updatePrefs(change) {
 
 function renderSettings() {
   const prefs = currentPrefs();
-  const sig = JSON.stringify([state.user?.uid, state.user?.email, state.profile?.nickname, state.profile?.photoURL,
+  const sig = JSON.stringify([mediaServerUrl(), state.user?.uid, state.user?.email, state.profile?.nickname, state.profile?.photoURL,
     state.profile?.avatarColor, prefs, historyOf("discarded").length, themePreference(), state.isAdmin, currentStar()?.activity.id]);
   if (!memo("settings", sig)) return;
 
@@ -1376,10 +1818,33 @@ function renderSettings() {
         h("span", { class: "count", text: String(historyOf("discarded").length) }), svgUse("i-chevron", "icon chev"))
     ),
     h("section", { class: "settings-card" }, h("h3", { text: "Apariencia" }), themeGroup),
+    storageCard(),
     isDevMode() && devToolsCard(),
     h("p", { class: "app-version", text: `Tux · Versión ${APP_VERSION}` })
   );
   syncThemeUI();
+}
+
+// Servidor multimedia activo (HDD del Mac mini, en local o por el túnel HTTPS).
+function storageCard() {
+  const url = mediaServerUrl();
+  const sources = { config: "publicado por el equipo de Tux", override: "fijado en este navegador", default: "local" };
+  let host = url;
+  try { host = new URL(url).host; } catch {}
+  return h("section", { class: "settings-card" },
+    h("h3", { text: "Almacenamiento" }),
+    h("button", {
+      class: "settings-row", type: "button",
+      onclick: async (e) => {
+        const btn = e.currentTarget;
+        setLoading(btn, true);
+        const status = await checkMediaServer();
+        setLoading(btn, false);
+        toast(status.ok ? "Disco de Tux conectado ✓" : status.message);
+      }
+    }, svgUse("i-shield"), h("span", { class: "row-text" }, "Disco de Tux", h("small", { text: `${host} · ${sources[mediaServerSource()]}` })),
+      svgUse("i-chevron", "icon chev"))
+  );
 }
 
 /* ---------- Herramientas de desarrollo (admin o modo dev) ---------- */
@@ -1663,7 +2128,11 @@ function renderComments(comments) {
     return h("li", { class: "comment" },
       h("span", { class: "comment-avatar", text: (c.authorName || "?").charAt(0) }),
       h("div", { class: "comment-body" },
-        h("div", { class: "comment-head" }, h("b", { text: c.authorName || "pingüino" }), h("time", { text: timeAgo(c.createdAt) })),
+        h("div", { class: "comment-head" },
+          c.authorId
+            ? h("button", { class: "author-link", type: "button", onclick: () => openUserProfile(c.authorId) }, c.authorName || "pingüino")
+            : h("b", { text: c.authorName || "pingüino" }),
+          h("time", { text: timeAgo(c.createdAt) })),
         h("p", { class: "comment-text", text: c.text })
       ),
       canDelete && h("button", {
@@ -1911,6 +2380,181 @@ completeForm.addEventListener("submit", async (e) => {
   } finally {
     setLoading(completeSubmit, false);
     completeSubmit.disabled = !completeCtx?.file;
+  }
+});
+
+/* ==========================================================
+   Mensajes privados
+   ========================================================== */
+const inboxModal = $("#inbox-modal");
+const chatModal = $("#chat-modal");
+const chatForm = $("#chat-form");
+chatForm.text.maxLength = MESSAGE_MAX;
+let chatCtx = null; // { uid, chatId, replyTo, messages, unsub, readAt }
+
+const peerName = (uid, el) => getPublicProfile(uid).then((p) => (el.textContent = p?.nickname || "Pingüino"));
+
+function renderChatBadge() {
+  const btn = $("#header-chat");
+  btn.hidden = !state.user;
+  const unread = state.user ? state.chats.filter((c) => isUnread(c, state.user.uid)).length : 0;
+  const badge = $("#chat-badge");
+  badge.hidden = unread === 0;
+  badge.textContent = unread > 9 ? "9+" : unread;
+  btn.setAttribute("aria-label", unread ? `Mensajes (${unread} sin leer)` : "Mensajes");
+}
+
+function renderInbox() {
+  const list = $("#chat-list");
+  if (!state.chats.length) {
+    list.replaceChildren(h("li", { class: "list-empty" }, tuxLogo("empty-mark"),
+      h("p", { text: "Sin conversaciones todavía. Abre el perfil de alguien y pulsa «Mensaje», o responde a una prueba desde Comunidad." })));
+    return;
+  }
+  const me = state.user.uid;
+  list.replaceChildren(...state.chats.map((chat) => {
+    const uid = otherMember(chat, me);
+    const name = h("b", { text: "…" });
+    peerName(uid, name);
+    const last = chat.lastMessage;
+    const unread = isUnread(chat, me);
+    return h("li", {},
+      h("button", { class: `chat-row${unread ? " is-unread" : ""}`, type: "button", onclick: () => openChat(uid) },
+        miniAvatar(uid, "", "md"),
+        h("span", { class: "plan-text" },
+          name,
+          h("small", { text: last ? `${last.senderId === me ? "Tú: " : ""}${last.text}` : "" })
+        ),
+        h("span", { class: "chat-row-meta" },
+          h("time", { text: timeAgo(chat.updatedAt) }),
+          unread && h("span", { class: "unread-dot", "aria-label": "Sin leer" }))
+      )
+    );
+  }));
+}
+
+$("#header-chat").addEventListener("click", () => {
+  if (!requireAuth()) return;
+  renderInbox();
+  openModal(inboxModal);
+});
+
+function openChat(uid, { replyTo = null } = {}) {
+  if (!requireAuth(() => openChat(uid, { replyTo }))) return;
+  if (!uid || uid === state.user.uid) return;
+  const chatId = chatIdFor(state.user.uid, uid);
+  if (chatCtx?.chatId !== chatId) {
+    chatCtx?.unsub();
+    const ctx = { uid, chatId, replyTo, messages: null, unsub: null, readAt: 0 };
+    chatCtx = ctx;
+    ctx.unsub = watchMessages(chatId, (messages) => {
+      if (chatCtx !== ctx) return;
+      ctx.messages = messages;
+      renderMessages();
+      markOpenChatRead();
+    }, (err) => {
+      console.warn("Tux: no se pudieron cargar los mensajes.", err);
+      if (chatCtx !== ctx) return;
+      ctx.messages = [];
+      renderMessages();
+    });
+  } else if (replyTo) {
+    chatCtx.replyTo = replyTo;
+  }
+  renderChatPeer();
+  renderReply();
+  renderMessages();
+  openModal(chatModal);
+  if (matchMedia("(hover: hover)").matches) setTimeout(() => chatForm.text.focus(), 280);
+  markOpenChatRead();
+}
+
+chatModal.addEventListener("close", () => {
+  chatCtx?.unsub();
+  chatCtx = null;
+});
+
+// Marca como leído una sola vez por mensaje nuevo (evita escrituras en bucle).
+function markOpenChatRead() {
+  if (!chatCtx || !chatModal.open || !state.user) return;
+  const chat = state.chats.find((c) => c.id === chatCtx.chatId);
+  if (!chat || !isUnread(chat, state.user.uid)) return;
+  const at = millis(chat.updatedAt);
+  if (chatCtx.readAt === at) return;
+  chatCtx.readAt = at;
+  markChatRead(chat.id, state.user.uid).catch((err) => console.warn("Tux: no se pudo marcar el chat como leído.", err));
+}
+
+function renderChatPeer() {
+  const { uid } = chatCtx;
+  const name = h("b", { text: "…" });
+  peerName(uid, name);
+  $("#chat-peer").replaceChildren(miniAvatar(uid, "", "md"), h("span", {}, name, h("small", { text: "Ver perfil" })));
+  $("#chat-peer").onclick = () => openUserProfile(uid);
+}
+
+function replyPreview(reply, cls) {
+  const visible = reply.thumb && canViewMedia(reply.thumb);
+  return h("span", { class: cls },
+    visible ? h("img", { src: resolveMediaUrl(reply.thumb), alt: "", loading: "lazy" }) : h("span", { class: "reply-icon" }, svgUse("i-reply")),
+    h("span", {}, h("small", { text: "Respuesta a la prueba" }), h("b", { text: reply.title || "Publicación" }))
+  );
+}
+
+function renderReply() {
+  const box = $("#chat-reply");
+  const reply = chatCtx?.replyTo;
+  box.hidden = !reply;
+  if (!reply) return box.replaceChildren();
+  box.replaceChildren(
+    replyPreview(reply, "reply-preview"),
+    h("button", {
+      class: "icon-action", type: "button", "aria-label": "Quitar respuesta",
+      onclick: () => {
+        chatCtx.replyTo = null;
+        renderReply();
+      }
+    }, svgUse("i-x"))
+  );
+}
+
+function renderMessages() {
+  const list = $("#chat-messages");
+  if (!chatCtx) return list.replaceChildren();
+  const { messages } = chatCtx;
+  if (messages === null) return list.replaceChildren(h("li", { class: "chat-empty" }, tuxLogo("empty-mark loading-mark")));
+  if (!messages.length) {
+    return list.replaceChildren(h("li", { class: "chat-empty" }, tuxLogo("empty-mark"),
+      h("p", { text: "Di hola 👋 Los mensajes son privados entre vosotros dos." })));
+  }
+  const me = state.user?.uid;
+  list.replaceChildren(...messages.map((m) => h("li", { class: `msg${m.senderId === me ? " is-mine" : ""}` },
+    m.replyTo && replyPreview(m.replyTo, "msg-reply"),
+    h("p", { text: m.text }),
+    h("time", { text: timeAgo(m.createdAt) })
+  )));
+  list.scrollTop = list.scrollHeight;
+}
+
+chatForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const text = chatForm.text.value.trim();
+  if (!text || !chatCtx || !requireAuth()) return;
+  const ctx = chatCtx;
+  const { replyTo } = ctx;
+  chatForm.text.value = "";
+  ctx.replyTo = null;
+  renderReply();
+  try {
+    await sendMessage({ from: state.user.uid, to: ctx.uid, text, replyTo });
+  } catch (err) {
+    console.error(err);
+    if (chatCtx === ctx) {
+      chatForm.text.value = text;
+      ctx.replyTo = replyTo;
+      renderReply();
+    }
+    toast("No se pudo enviar el mensaje.");
   }
 });
 

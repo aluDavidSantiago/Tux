@@ -1,8 +1,8 @@
 {
   "name": "tux-media-server",
-  "version": "1.1.0-beta",
+  "version": "1.2.0-beta",
   "private": true,
-  "description": "Servidor local de multimedia de Tux: guarda las pruebas en el disco externo (/Volumes/HDD/Tux_Storage).",
+  "description": "Servidor de multimedia de Tux: guarda las pruebas en el disco externo (/Volumes/HDD/Tux_Storage) y las publica por un túnel HTTPS de Cloudflare.",
   "type": "module",
   "main": "server.js",
   "scripts": {
@@ -10,7 +10,14 @@
     "admin": "node admin.js",
     "agent:install": "bash launchd/install-agent.sh",
     "agent:uninstall": "bash launchd/uninstall-agent.sh",
-    "agent:status": "launchctl print gui/$(id -u)/com.tux.mediaserver | grep -E 'state|pid|last exit' ; curl -s http://localhost:8787/health; echo"
+    "agent:status": "launchctl print gui/$(id -u)/com.tux.mediaserver | grep -E 'state|pid|last exit' ; curl -s http://localhost:8787/health; echo",
+    "tunnel:quick": "bash tunnel/tunnel.sh quick",
+    "tunnel:setup": "bash tunnel/tunnel.sh setup",
+    "tunnel:run": "bash tunnel/tunnel.sh run",
+    "tunnel:url": "bash tunnel/tunnel.sh url",
+    "tunnel:install": "bash tunnel/install-tunnel-agent.sh",
+    "tunnel:uninstall": "bash tunnel/uninstall-tunnel-agent.sh",
+    "tunnel:status": "launchctl print gui/$(id -u)/com.tux.tunnel | grep -E 'state|pid|last exit' ; bash tunnel/tunnel.sh url"
   },
   "engines": {
     "node": ">=20"

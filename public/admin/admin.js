@@ -1,4 +1,5 @@
-// Tux · panel de administración: pruebas multimedia, planes, usuarios y notificaciones.
+// Tux · panel de administración: pruebas multimedia, planes, usuarios, notificaciones y servidor
+// multimedia (URL pública del túnel HTTPS hacia el HDD).
 // La interfaz solo se muestra a admins, pero los permisos reales los imponen las reglas de
 // Firestore (admins/{uid}) y el servidor del HDD.
 import { CATEGORIES, millis } from "../../src/activities.js";
@@ -7,7 +8,12 @@ import {
   isAdminUser, listProofs, listActivities, listUsers, listSentNotifications,
   adminRemoveProofMedia, adminDeleteProof, adminDeleteActivity, sendNotification
 } from "../../src/admin.js";
-import { resolveMediaUrl, mediaThumbUrl, isEquirectangular, checkMediaServer } from "../../src/media.js";
+import {
+  resolveMediaUrl, mediaThumbUrl, isEquirectangular, checkMediaServer, startMediaSession, stopMediaSession, onMediaAccessChange
+} from "../../src/media.js";
+import {
+  DEFAULT_MEDIA_SERVER, mediaServerUrl, mediaServerSource, normalizeServerUrl, publishMediaServerUrl
+} from "../../src/mediaConfig.js";
 import { NOTIFICATION_KINDS } from "../../src/notifications.js";
 import { $, h, svgUse, tuxLogo, timeAgo, toast, setLoading, initModals, confirmDialog } from "../js/ui.js";
 import { initViewer, openViewer } from "../js/viewer.js";
@@ -37,6 +43,7 @@ const state = {
   users: [],
   sent: [],
   storageOk: null,
+  tunnelUrl: "",
   notifyTo: "all"
 };
 
@@ -117,19 +124,29 @@ function renderUserChip() {
 watchSession(async (user) => {
   state.user = user;
   renderUserChip();
-  if (!user) return renderGate();
+  if (!user) {
+    stopMediaSession();
+    return renderGate();
+  }
   main.replaceChildren(h("div", { class: "admin-loading" }, tuxLogo("loading-mark")));
   if (!(await isAdminUser(user.uid))) return renderRestricted(user);
+  startMediaSession(user);
   await loadAll();
 });
+
+// Las miniaturas del HDD necesitan el ticket de lectura: se repinta cuando llega.
+onMediaAccessChange(() => state.proofs.length && render());
 
 /* ---------- Datos ---------- */
 async function loadAll() {
   try {
-    const [proofs, activities, users, sent, storage] = await Promise.all([
-      listProofs(), listActivities(), listUsers(), listSentNotifications().catch(() => []), checkMediaServer()
+    const [proofs, activities, users, sent, storage, local] = await Promise.all([
+      listProofs(), listActivities(), listUsers(), listSentNotifications().catch(() => []), checkMediaServer(),
+      // En el propio Mac mini: el servidor local anuncia la URL del túnel activo.
+      mediaServerUrl() === DEFAULT_MEDIA_SERVER ? null : checkMediaServer(DEFAULT_MEDIA_SERVER)
     ]);
-    Object.assign(state, { proofs, activities, users, sent, storageOk: storage.ok });
+    const tunnelUrl = normalizeServerUrl(local?.publicUrl || storage.publicUrl);
+    Object.assign(state, { proofs, activities, users, sent, storageOk: storage.ok, tunnelUrl });
     render();
   } catch (err) {
     console.error(err);
@@ -142,7 +159,8 @@ const TABS = [
   { id: "proofs", label: "Pruebas multimedia" },
   { id: "plans", label: "Planes" },
   { id: "users", label: "Usuarios" },
-  { id: "notify", label: "Notificaciones" }
+  { id: "notify", label: "Notificaciones" },
+  { id: "server", label: "Servidor multimedia" }
 ];
 
 function statCard(value, label, accent = false) {
@@ -151,7 +169,7 @@ function statCard(value, label, accent = false) {
 
 function render() {
   const p360 = state.proofs.filter((p) => p.is360).length;
-  const views = { proofs: renderProofs, plans: renderPlans, users: renderUsers, notify: renderNotify };
+  const views = { proofs: renderProofs, plans: renderPlans, users: renderUsers, notify: renderNotify, server: renderServer };
   main.replaceChildren(
     h("section", { class: "admin-stats" },
       statCard(state.users.length, "Usuarios"),
@@ -420,5 +438,67 @@ function renderNotify() {
   return h("div", { class: "admin-columns" },
     h("section", { class: "settings-card" }, h("h3", { text: "Enviar notificación" }), form),
     h("section", { class: "settings-card" }, h("h3", { text: "Enviadas recientemente" }), sentList)
+  );
+}
+
+/* ---------- Servidor multimedia (túnel HTTPS) ---------- */
+// Publica en Firestore config/media la URL con la que todos los clientes llegan al HDD.
+function renderServer() {
+  const sources = {
+    config: "publicada en Firestore (config/media)",
+    override: "fijada solo en este navegador (?media=)",
+    default: "por defecto: solo funciona en el propio Mac mini"
+  };
+  const input = h("input", {
+    type: "url", inputmode: "url", maxlength: "200", placeholder: "https://media.tudominio.com",
+    value: mediaServerSource() === "config" ? mediaServerUrl() : state.tunnelUrl
+  });
+  const error = h("p", { class: "form-error", role: "alert" });
+  const submit = h("button", { class: "primary-btn", type: "submit" }, svgUse("i-send"), "Publicar URL");
+  const form = h("form", { class: "form admin-notify", novalidate: true },
+    h("label", { class: "field" }, h("span", { text: "URL pública del servidor multimedia" }), input),
+    h("p", { class: "form-hint", text: "Todos los móviles y navegadores usarán esta URL para subir y ver pruebas. Debe ser https (túnel de Cloudflare)." }),
+    state.tunnelUrl && h("button", {
+      class: "ghost-btn small", type: "button",
+      onclick: () => { input.value = state.tunnelUrl; }
+    }, svgUse("i-refresh"), `Usar URL del túnel (${state.tunnelUrl.replace("https://", "")})`),
+    error,
+    submit
+  );
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const url = normalizeServerUrl(input.value);
+    if (!url) return (error.textContent = "Introduce una URL https:// sin ruta (o http://localhost:8787).");
+    error.textContent = "";
+    setLoading(submit, true);
+    try {
+      const health = await checkMediaServer(url);
+      if (!health.ok && !(await confirmDialog({
+        title: "El servidor no responde",
+        message: `${url} no responde ahora mismo (${health.message}). ¿Publicarla igualmente?`,
+        confirmLabel: "Publicar", danger: false, icon: "i-send"
+      }))) return;
+      await publishMediaServerUrl(url, state.user);
+      toast("URL publicada · los clientes la usarán al instante");
+      setTimeout(loadAll, 600);
+    } catch (err) {
+      console.error(err);
+      error.textContent = err.message || "No se pudo publicar.";
+    } finally {
+      setLoading(submit, false);
+    }
+  });
+
+  return h("section", { class: "admin-section" },
+    h("div", { class: "admin-card admin-server" },
+      h("div", { class: "admin-card-body" },
+        h("b", { text: mediaServerUrl() }),
+        h("small", { text: `Servidor activo · ${sources[mediaServerSource()]}` }),
+        h("small", { text: state.storageOk ? "✓ Responde y el HDD está montado" : "✗ No responde o el HDD no está montado" }),
+        state.tunnelUrl && h("small", { text: `Túnel detectado: ${state.tunnelUrl}` })
+      )
+    ),
+    form,
+    h("p", { class: "form-hint", text: "En el Mac mini: «npm run tunnel:install» en server/ deja el túnel como servicio. Guía completa en server/tunnel/README.md." })
   );
 }

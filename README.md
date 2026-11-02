@@ -2,14 +2,18 @@
 
 **Tux** es una red social minimalista para descubrir y compartir actividades casuales, económicas y de bajo esfuerzo. Cada día (o cada semana) Tux elige **una actividad estrella** para ti, la cierras con una prueba en foto, vídeo o **360°/VR**, y la comunidad la ve en una galería inmersiva.
 
-🔗 **Demo:** https://aludavidsantiago.github.io/Tux/ · **Admin:** https://aludavidsantiago.github.io/Tux/admin/ · **Versión:** 1.1.0-beta
+🔗 **Demo:** https://aludavidsantiago.github.io/Tux/ · **Admin:** https://aludavidsantiago.github.io/Tux/admin/ · **Versión:** 1.2.0-beta
 
 ## 🚀 Características
 - **Panel · TuxPlans Central:** una única actividad estrella por periodo, elegida según tus intereses, presupuesto y energía máximos, con los motivos de la elección a la vista y una cuenta atrás hasta la siguiente.
 - **Frecuencia configurable:** de una sugerencia al día a una a la semana (diaria, 2 días, 3 días, semanal).
 - **Descarte con justificación:** descartar exige elegir un motivo («No tengo el material requerido», «Ubicación inalcanzable», «No es mi vibe»…). Sin motivo, el botón no se activa.
 - **Mis planes:** en curso, completados, guardados y **papelera**. Lo descartado no se vuelve a sugerir salvo que lo restaures.
-- **Prueba multimedia obligatoria:** completar un plan exige adjuntar JPG/PNG (≤10 MB) o MP4 (≤100 MB), que se guardan en el disco externo `/Volumes/HDD/Tux_Storage` a través del servidor local de Tux.
+- **Prueba multimedia obligatoria:** completar un plan exige adjuntar JPG/PNG (≤50 MB) o MP4 (≤500 MB), que se guardan en el disco externo `/Volumes/HDD/Tux_Storage` a través del servidor de Tux. Sin Cloudinary ni otras plataformas: el 100 % del almacenamiento está en el HDD.
+- **Acceso global:** el servidor del Mac mini se publica con un túnel HTTPS de Cloudflare, así que móviles y ordenadores de fuera de casa suben y ven las pruebas. Los archivos grandes se suben por trozos de 48 MB (límite de 100 MB por petición de Cloudflare).
+- **Comunidad:** feed de publicaciones (pruebas) en «Descubrir» y «Siguiendo», búsqueda de usuarios por nickname y botón «Responder» que abre un chat privado con la publicación citada.
+- **Perfiles públicos:** seguidores y seguidos (contadores en tiempo real), rejilla de pruebas, pestaña 360°/VR, planes publicados y actividad. Botones «Seguir / Siguiendo» y «Mensaje».
+- **Mensajes privados:** chats 1 a 1 en tiempo real con indicador de no leídos en la cabecera.
 - **360°/VR (Insta360):** detección por proporción 2:1 **y** por metadatos (XMP `GPano` en JPG/PNG, Spherical Video V1/V2 `sv3d`/`proj` en MP4). Todo contenido 360° —aunque se subiera sin marcar— se abre siempre en el visor inmersivo A-Frame (WebXR). Límites locales ampliados para exportaciones 360°: 50 MB por foto y 500 MB por vídeo.
 - **Gestión de tus publicaciones:** eliminar tus planes publicados (con confirmación), reemplazar o quitar la prueba multimedia de un plan completado (vuelve a «En curso»). Cada borrado elimina también el archivo físico del HDD.
 - **Notificaciones:** campana en la cabecera con los avisos que envía el equipo de Tux.
@@ -22,7 +26,7 @@
 ## 🛠️ Stack técnico
 - **Frontend:** HTML5, CSS3 y JavaScript (módulos ES nativos, sin build).
 - **Backend:** Firebase Authentication + Cloud Firestore.
-- **Multimedia:** servidor Node local (`server/`) que guarda en el HDD externo · Cloudinary como alternativa · visor 360° con A-Frame 1.6.
+- **Multimedia:** servidor Node (`server/`) que guarda en el HDD externo, expuesto con Cloudflare Tunnel · visor 360° con A-Frame 1.6.
 - **Hosting:** GitHub Pages.
 
 ## 📂 Estructura
@@ -39,19 +43,22 @@
 │   └── img/                # Logo, favicon e icono táctil
 ├── src/
 │   ├── firebaseConfig.js   # Firebase App, Auth y Firestore
-│   ├── mediaConfig.js      # ⚙️ Proveedor multimedia (local/Cloudinary) y URL del servidor
+│   ├── mediaConfig.js      # ⚙️ URL del servidor multimedia (?media=, Firestore config/media o localhost)
 │   ├── auth.js · users.js  # Acceso y perfiles
 │   ├── activities.js       # Catálogo, feed en tiempo real y filtros
-│   ├── social.js           # Me apunto, guardados y comentarios
+│   ├── social.js           # Me apunto, guardados, comentarios y seguidores
+│   ├── chat.js             # Mensajería privada en tiempo real
 │   ├── plans.js            # Preferencias, estrella e historial
 │   ├── recommendations.js  # Motor de la actividad estrella (funciones puras)
-│   ├── media.js            # Validación, detección 360° (2:1 + metadatos), subida y borrado
+│   ├── media.js            # Validación, detección 360°, ticket de lectura, subida (por trozos) y borrado
 │   ├── notifications.js    # Notificaciones de usuario
 │   └── admin.js            # Operaciones de administración
 ├── server/                 # Servidor multimedia local (Node ≥ 20)
-│   ├── server.js           # API de subida + entrega de archivos (sin listados ni borrado web)
+│   ├── server.js           # API de subida (directa o por trozos), tickets y entrega de archivos
 │   ├── storage.js          # Carpetas aisladas por usuario en el HDD
 │   ├── auth.js             # Verificación de ID tokens de Firebase
+│   ├── tickets.js          # Tickets de lectura firmados (HMAC) para <img>/<video>
+│   ├── tunnel/             # Cloudflare Tunnel: tunnel.sh, LaunchAgent y guía (README.md)
 │   ├── admin.js            # Estadísticas y purga (solo terminal)
 │   └── config.js           # Rutas, puertos, orígenes y límites
 ├── firestore.rules
@@ -62,7 +69,11 @@
 
 | Ruta | Campos |
 |------|--------|
-| `users/{uid}` | `nickname`, `photoURL`, `avatarColor`, `bio`, `prefs { frequencyDays, interests[], maxBudget, maxEffort }`, `star { activityId, period, frequencyDays }`, `createdAt` |
+| `users/{uid}` | `nickname`, `photoURL`, `avatarColor`, `bio`, `prefs { frequencyDays, interests[], maxBudget, maxEffort }`, `star { activityId, period, frequencyDays }`, `followersCount`, `followingCount`, `createdAt` |
+| `follows/{followerUid}_follows_{targetUid}` | `followerUid`, `targetUid`, `createdAt` (los contadores cambian en el mismo batch; las reglas lo verifican) |
+| `chats/{uidA}_{uidB}` | `members [uidA, uidB]` ordenados, `lastMessage { text, senderId, createdAt }`, `updatedAt`, `lastRead { uid: fecha }` |
+| `chats/{id}/messages/{id}` | `senderId`, `text` (≤1000), `createdAt`, `replyTo { proofId, title, thumb }` opcional |
+| `config/media` | `serverUrl` (URL pública del túnel), `updatedBy`, `updatedAt` · solo admins escriben |
 | `users/{uid}/history/{activityId}` | `status` (accepted · completed · discarded), `title`, `category`, `emoji`, `imageUrl`, `reason`, `note`, `proofId`, `proofUrl`, `proofType`, `is360`, `updatedAt` |
 | `activities/{id}` (+ `comments`) | plan publicado con contadores `likeCount` / `commentCount` |
 | `likes` · `saved` | `{uid}_{activityId}` → `uid`, `activityId`, `createdAt` |
@@ -70,7 +81,7 @@
 | `admins/{uid}` | documento de alta de administrador (solo se crea desde la consola) |
 | `proofs/{id}` | `uid`, `authorName`, `activityId`, `activityTitle`, `url`, `thumbUrl`, `type`, `is360`, `width`, `height`, `caption`, `createdAt` |
 
-Las reglas exigen `reason` al descartar y una prueba al completar. Las pruebas locales se guardan como `local:users/{uid}/{archivo}` y las reglas solo aceptan referencias a la carpeta del **propio** usuario.
+Las reglas exigen `reason` al descartar y una prueba al completar. Las pruebas se guardan como `local:users/{uid}/{archivo}` y las reglas solo aceptan referencias a la carpeta del **propio** usuario. Los chats solo los leen y escriben sus dos miembros (la pertenencia se deduce del ID).
 
 ## 💾 Almacenamiento en el disco externo (HDD)
 ```bash
@@ -80,6 +91,7 @@ npm start            # manual: http://localhost:8787 → /Volumes/HDD/Tux_Storag
 ```
 - Estructura: `/Volumes/HDD/Tux_Storage/users/{uid}/{uuid}.jpg|png|mp4` (+ `{uuid}.thumb.jpg` para vídeos).
 - **Aislamiento:** solo el servidor escribe; cada subida exige un ID token de Firebase válido y va a la carpeta de ese uid. Se comprueban tipo, firma binaria, tamaño (50 MB imagen, 500 MB vídeo), cuota (20 GB/usuario) y ritmo (20 subidas/min).
+- **Solo usuarios con sesión:** para ver un archivo hace falta un ticket de lectura (`?k=`) que el servidor emite tras validar el ID token (`POST /api/media/ticket`, firmado con HMAC, caduca a las 12–18 h). Cualquier usuario autenticado puede ver las pruebas de los demás; los invitados no.
 - **No navegable:** no hay listados de carpetas ni rutas de modificación; los archivos se sirven solo por su nombre UUID exacto.
 - **Borrado sincronizado:** `DELETE /api/media/users/{uid}/{archivo}` solo para el dueño del archivo o un admin. Borrar un vídeo arrastra su miniatura.
 - **Seguridad del disco:** si el HDD no está montado, el servidor no arranca ni escribe (evita crear `/Volumes/HDD` en el disco interno).
@@ -96,7 +108,17 @@ npm start            # manual: http://localhost:8787 → /Volumes/HDD/Tux_Storag
   npm run admin -- purge --uid <uid> --yes
   npm run admin -- purge --all --yes
   ```
-- Variables opcionales: `TUX_STORAGE_ROOT`, `TUX_VOLUME_ROOT`, `TUX_PORT`, `TUX_EXTRA_ORIGINS`.
+- Variables opcionales: `TUX_STORAGE_ROOT`, `TUX_VOLUME_ROOT`, `TUX_PORT`, `TUX_EXTRA_ORIGINS`, `TUX_PUBLIC_URL`, `TUX_TICKET_SECRET_FILE`.
+
+## 🌍 Acceso global (Cloudflare Tunnel)
+```bash
+brew install cloudflared
+cd server
+npm run tunnel:quick                            # prueba: URL https://….trycloudflare.com
+npm run tunnel:setup -- media.tudominio.com     # URL fija (dominio en Cloudflare)
+npm run tunnel:install                          # LaunchAgent com.tux.tunnel
+```
+Después, en **/admin → Servidor multimedia**, publica la URL del túnel: todos los clientes la leen de Firestore (`config/media`) en tiempo real. Para probar en un solo navegador: `?media=https://…` (y `?media=reset`). Guía completa en [`server/tunnel/README.md`](server/tunnel/README.md).
 - El disco está en **exFAT**, que no guarda permisos POSIX: el aislamiento lo garantiza el servidor, no el sistema de archivos.
 
 ## 🛡️ Administradores
@@ -109,7 +131,7 @@ Las reglas permiten a un admin borrar planes y pruebas de cualquier usuario, dev
 
 ## 🔐 Configuración
 1. **Firebase Auth:** activar *Email/Password* y *Google*; añadir `aludavidsantiago.github.io` a los dominios autorizados.
-2. **Multimedia:** por defecto `MEDIA_PROVIDER = "local"` en `src/mediaConfig.js` (servidor de arriba). Para Cloudinary, cambia a `"cloudinary"` y rellena `cloudName` y `uploadPreset`.
+2. **Multimedia:** servidor de `server/` + túnel de Cloudflare; la URL se publica desde `/admin` (ver «Acceso global»).
 3. **Reglas:** `firebase deploy --only firestore:rules`
 
 ## 💻 Desarrollo local

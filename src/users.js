@@ -1,7 +1,12 @@
-// Módulo de perfiles: documento users/{uid} con nickname, avatar, bio, preferencias y fecha de registro.
+// Módulo de perfiles: documento users/{uid} con nickname, avatar, bio, preferencias, contadores de
+// seguidores (followersCount / followingCount) y fecha de registro. Los perfiles son públicos.
 import {
+  collection,
   doc,
   getDoc,
+  getDocs,
+  query,
+  limit,
   setDoc,
   updateDoc,
   onSnapshot,
@@ -72,4 +77,40 @@ export function updateUserProfile(uid, changes) {
   if (AVATAR_COLORS.includes(changes.avatarColor)) allowed.avatarColor = changes.avatarColor;
   if (typeof changes.photoURL === "string") allowed.photoURL = changes.photoURL.trim().slice(0, 500);
   return updateDoc(userRef(uid), allowed);
+}
+
+/* ---------- Perfiles públicos ---------- */
+// Caché de perfiles ajenos (cabeceras de publicaciones, chats, listas de seguidores).
+const profileCache = new Map();
+
+export function getPublicProfile(uid) {
+  if (!profileCache.has(uid)) {
+    profileCache.set(uid, getDoc(userRef(uid))
+      .then((snap) => (snap.exists() ? { uid, ...snap.data() } : null))
+      .catch(() => {
+        profileCache.delete(uid);
+        return null;
+      }));
+  }
+  return profileCache.get(uid);
+}
+
+export const rememberProfile = (uid, profile) => profile && profileCache.set(uid, Promise.resolve({ uid, ...profile }));
+
+// Búsqueda por nickname. Con pocos cientos de usuarios basta con filtrar en el cliente
+// (Firestore no tiene búsqueda por subcadena).
+let directory = null;
+export async function searchUsers(text) {
+  directory ||= getDocs(query(collection(db, "users"), limit(500)))
+    .then((snap) => snap.docs.map((d) => ({ uid: d.id, ...d.data() })))
+    .catch((err) => {
+      directory = null;
+      throw err;
+    });
+  const needle = text.trim().toLowerCase();
+  const users = await directory;
+  users.forEach((u) => rememberProfile(u.uid, u));
+  return needle
+    ? users.filter((u) => (u.nickname || "").toLowerCase().includes(needle)).slice(0, 20)
+    : [];
 }

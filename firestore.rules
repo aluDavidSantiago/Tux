@@ -1,7 +1,8 @@
 rules_version = '2';
 
 // Reglas de seguridad de Tux.
-// Colecciones: users (+ history), activities (+ comments), likes, saved, proofs, notifications, admins.
+// Colecciones: users (+ history), activities (+ comments), likes, saved, proofs, notifications, admins,
+// follows, chats (+ messages) y config.
 service cloud.firestore {
   match /databases/{database}/documents {
 
@@ -15,6 +16,8 @@ service cloud.firestore {
     function onlyChanged(keys) {
       return request.resource.data.diff(resource.data).affectedKeys().hasOnly(keys);
     }
+    function userPath(uid) { return /databases/$(database)/documents/users/$(uid); }
+    function counter(d, key) { return d.get(key, 0); }
 
     // ---------- Perfiles ----------
     function validPrefs(p) {
@@ -36,7 +39,10 @@ service cloud.firestore {
 
     // nickname y createdAt son obligatorios; el resto es opcional pero se valida si existe.
     function validUser(d) {
-      return d.keys().hasOnly(['nickname', 'photoURL', 'avatarColor', 'bio', 'prefs', 'star', 'createdAt'])
+      return d.keys().hasOnly(['nickname', 'photoURL', 'avatarColor', 'bio', 'prefs', 'star',
+                               'followersCount', 'followingCount', 'createdAt'])
+        && counter(d, 'followersCount') is int && counter(d, 'followersCount') >= 0
+        && counter(d, 'followingCount') is int && counter(d, 'followingCount') >= 0
         && d.nickname is string && d.nickname.size() >= 1 && d.nickname.size() <= 24
         && (!('bio' in d) || (d.bio is string && d.bio.size() <= 160))
         && (!('photoURL' in d) || (d.photoURL is string && d.photoURL.size() <= 500))
@@ -45,11 +51,10 @@ service cloud.firestore {
         && (!('star' in d) || validStar(d.star));
     }
 
-    // Referencia multimedia: URL de Cloudinary o archivo del servidor local en la carpeta del PROPIO usuario.
+    // Referencia multimedia: archivo del HDD (servidor de Tux) en la carpeta del PROPIO usuario.
     function mediaRef(u) {
-      return u is string && u.size() <= 500 && (
-        u.matches('https://res[.]cloudinary[.]com/.+')
-        || u.matches('local:users/' + request.auth.uid + '/[0-9a-f-]{36}([.]thumb)?[.](jpg|png|mp4)'));
+      return u is string && u.size() <= 500
+        && u.matches('local:users/' + request.auth.uid + '/[0-9a-f-]{36}([.]thumb)?[.](jpg|png|mp4)');
     }
     function optionalMediaRef(u) { return u == '' || mediaRef(u); }
 
@@ -69,12 +74,37 @@ service cloud.firestore {
                                         && d.proofType in ['image', 'video'] && d.is360 is bool));
     }
 
+    // Contadores de seguidores: solo cambian ±1 junto a la relación follows/{seguidor}_follows_{seguido}.
+    function followPath(followerUid, targetUid) {
+      return /databases/$(database)/documents/follows/$(followerUid + '_follows_' + targetUid);
+    }
+    function followCountersUnchanged() {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny(['followersCount', 'followingCount']);
+    }
+    // "Siguiendo" del propio perfil (la regla de follows exige este mismo cambio en el batch).
+    function validFollowingChange() {
+      let delta = counter(request.resource.data, 'followingCount') - counter(resource.data, 'followingCount');
+      return onlyChanged(['followingCount']) && (delta == 1 || delta == -1);
+    }
+    // "Seguidores" de otro usuario: +1 solo si a la vez se crea mi relación con él, -1 si se borra.
+    function validFollowersChange(uid) {
+      let p = followPath(request.auth.uid, uid);
+      let delta = counter(request.resource.data, 'followersCount') - counter(resource.data, 'followersCount');
+      return onlyChanged(['followersCount'])
+        && ((delta == 1 && !exists(p) && existsAfter(p)) || (delta == -1 && exists(p) && !existsAfter(p)));
+    }
+
     match /users/{uid} {
       allow read: if true;
       allow create: if isUser(uid) && validUser(request.resource.data)
+        && counter(request.resource.data, 'followersCount') == 0
+        && counter(request.resource.data, 'followingCount') == 0
         && request.resource.data.createdAt == request.time;
-      allow update: if isUser(uid) && validUser(request.resource.data)
-        && request.resource.data.createdAt == resource.data.createdAt;
+      allow update: if (isUser(uid) && validUser(request.resource.data)
+          && request.resource.data.createdAt == resource.data.createdAt
+          && (followCountersUnchanged() || validFollowingChange()))
+        || (signedIn() && !isUser(uid) && validFollowersChange(uid)
+          && counter(request.resource.data, 'followersCount') >= 0);
       allow delete: if false;
 
       match /history/{activityId} {
@@ -214,6 +244,100 @@ service cloud.firestore {
       allow update: if signedIn() && resource.data.toUid == request.auth.uid
         && onlyChanged(['read']) && request.resource.data.read is bool;
       allow delete: if signedIn() && (resource.data.toUid == request.auth.uid || isAdmin());
+    }
+
+    // ---------- Seguidores ----------
+    // follows/{followerUid}_follows_{targetUid}: públicos (listas de seguidores en los perfiles).
+    match /follows/{followId} {
+      allow read: if true;
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['followerUid', 'targetUid', 'createdAt'])
+        && request.resource.data.followerUid == request.auth.uid
+        && request.resource.data.targetUid is string
+        && request.resource.data.targetUid != request.auth.uid
+        && followId == request.auth.uid + '_follows_' + request.resource.data.targetUid
+        && request.resource.data.createdAt == request.time
+        && counter(getAfter(userPath(request.auth.uid)).data, 'followingCount')
+          == counter(get(userPath(request.auth.uid)).data, 'followingCount') + 1
+        && counter(getAfter(userPath(request.resource.data.targetUid)).data, 'followersCount')
+          == counter(get(userPath(request.resource.data.targetUid)).data, 'followersCount') + 1;
+      allow delete: if signedIn() && resource.data.followerUid == request.auth.uid
+        && counter(getAfter(userPath(request.auth.uid)).data, 'followingCount')
+          == counter(get(userPath(request.auth.uid)).data, 'followingCount') - 1
+        && counter(getAfter(userPath(resource.data.targetUid)).data, 'followersCount')
+          == counter(get(userPath(resource.data.targetUid)).data, 'followersCount') - 1;
+    }
+
+    // ---------- Mensajería privada ----------
+    // chats/{uidA}_{uidB} con los uids ordenados: la pertenencia se deduce del propio ID.
+    function chatMember(chatId) { return signedIn() && request.auth.uid in chatId.split('_'); }
+    function chatPath(chatId) { return /databases/$(database)/documents/chats/$(chatId); }
+    function validLastMessage(m) {
+      return m is map && m.keys().hasOnly(['text', 'senderId', 'createdAt'])
+        && m.text is string && m.text.size() >= 1 && m.text.size() <= 140
+        && m.senderId == request.auth.uid
+        && m.createdAt == request.time;
+    }
+    // Respuesta a una publicación: miniatura solo como referencia a una imagen del HDD.
+    function validReply(r) {
+      return r is map && r.keys().hasOnly(['proofId', 'title', 'thumb'])
+        && r.proofId is string && r.proofId.size() <= 128
+        && r.title is string && r.title.size() <= 80
+        && r.thumb is string
+        && (r.thumb == '' || r.thumb.matches('local:users/[A-Za-z0-9]+/[0-9a-f-]{36}([.]thumb)?[.](jpg|png)'));
+    }
+
+    match /chats/{chatId} {
+      allow get: if chatMember(chatId);
+      allow list: if signedIn() && request.auth.uid in resource.data.members;
+      allow create: if chatMember(chatId)
+        && request.resource.data.keys().hasOnly(['members', 'lastMessage', 'updatedAt', 'lastRead'])
+        && request.resource.data.members is list
+        && request.resource.data.members.size() == 2
+        && request.resource.data.members[0] < request.resource.data.members[1]
+        && chatId == request.resource.data.members[0] + '_' + request.resource.data.members[1]
+        && exists(userPath(request.resource.data.members[0]))
+        && exists(userPath(request.resource.data.members[1]))
+        && validLastMessage(request.resource.data.lastMessage)
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.lastRead.keys().hasOnly([request.auth.uid]);
+      // Enviar (último mensaje) o marcar como leído: cada uno solo toca su propia marca de lectura.
+      allow update: if chatMember(chatId)
+        && request.resource.data.members == resource.data.members
+        && onlyChanged(['lastMessage', 'updatedAt', 'lastRead'])
+        && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['lastMessage', 'updatedAt'])
+          || (validLastMessage(request.resource.data.lastMessage) && request.resource.data.updatedAt == request.time))
+        && request.resource.data.lastRead.diff(resource.data.get('lastRead', {})).affectedKeys().hasOnly([request.auth.uid]);
+      allow delete: if false;
+
+      match /messages/{messageId} {
+        allow read: if chatMember(chatId);
+        allow create: if chatMember(chatId)
+          && request.resource.data.keys().hasOnly(['senderId', 'text', 'createdAt', 'replyTo'])
+          && request.resource.data.senderId == request.auth.uid
+          && request.resource.data.text is string
+          && request.resource.data.text.size() >= 1
+          && request.resource.data.text.size() <= 1000
+          && request.resource.data.createdAt == request.time
+          && (!('replyTo' in request.resource.data) || validReply(request.resource.data.replyTo))
+          && getAfter(chatPath(chatId)).data.updatedAt == request.time;
+        allow update: if false;
+        allow delete: if chatMember(chatId) && resource.data.senderId == request.auth.uid;
+      }
+    }
+
+    // ---------- Configuración pública (URL del servidor multimedia / túnel) ----------
+    match /config/{docId} {
+      allow read: if true;
+      allow create, update: if isAdmin() && docId == 'media'
+        && request.resource.data.keys().hasOnly(['serverUrl', 'updatedBy', 'updatedAt'])
+        && request.resource.data.serverUrl is string
+        && request.resource.data.serverUrl.size() <= 200
+        && (request.resource.data.serverUrl.matches('https://[A-Za-z0-9.-]+(:[0-9]+)?')
+          || request.resource.data.serverUrl.matches('http://(localhost|127[.]0[.]0[.]1)(:[0-9]+)?'))
+        && request.resource.data.updatedBy == request.auth.uid
+        && request.resource.data.updatedAt == request.time;
+      allow delete: if isAdmin();
     }
 
     // ---------- Admins (solo lectura del propio documento) ----------

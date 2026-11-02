@@ -1,7 +1,9 @@
-// Módulo social: "Me apunto" (likes), guardados y comentarios.
+// Módulo social: "Me apunto" (likes), guardados, comentarios y seguidores.
 // likes/{uid}_{activityId}, saved/{uid}_{activityId}:
 //   { uid, activityId, createdAt }
 // activities/{id}/comments/{commentId}: { authorId, authorName, text, createdAt }
+// follows/{followerUid}_follows_{targetUid}: { followerUid, targetUid, createdAt }
+//   + contadores users/{uid}.followersCount / followingCount (mismo batch; las reglas lo verifican).
 import {
   collection,
   doc,
@@ -12,6 +14,7 @@ import {
   orderBy,
   limit,
   onSnapshot,
+  getDocs,
   writeBatch,
   increment,
   serverTimestamp
@@ -77,4 +80,35 @@ export async function deleteComment(activityId, commentId) {
   batch.delete(doc(commentsCol(activityId), commentId));
   batch.update(doc(db, "activities", activityId), { commentCount: increment(-1) });
   await batch.commit();
+}
+
+/* ---------- Seguidores ---------- */
+export const followId = (followerUid, targetUid) => `${followerUid}_follows_${targetUid}`;
+
+// Relación y ambos contadores en un único batch: las reglas exigen que vayan juntos.
+export async function setFollow(followerUid, targetUid, on) {
+  if (followerUid === targetUid) throw new Error("No puedes seguirte a ti mismo.");
+  const batch = writeBatch(db);
+  const ref = doc(db, "follows", followId(followerUid, targetUid));
+  if (on) batch.set(ref, { followerUid, targetUid, createdAt: serverTimestamp() });
+  else batch.delete(ref);
+  batch.update(doc(db, "users", followerUid), { followingCount: increment(on ? 1 : -1) });
+  batch.update(doc(db, "users", targetUid), { followersCount: increment(on ? 1 : -1) });
+  await batch.commit();
+}
+
+// uids a los que sigue un usuario (en tiempo real).
+export function watchFollowing(uid, callback) {
+  const q = query(collection(db, "follows"), where("followerUid", "==", uid), limit(500));
+  return onSnapshot(q, (snap) => callback(snap.docs.map((d) => d.data().targetUid)),
+    (err) => console.warn("Tux: no se pudo escuchar a quién sigues.", err));
+}
+
+// Lista de seguidores o seguidos de cualquier usuario (perfil público).
+export async function listFollows(uid, kind) {
+  const field = kind === "followers" ? "targetUid" : "followerUid";
+  const snap = await getDocs(query(collection(db, "follows"), where(field, "==", uid), limit(300)));
+  const entries = snap.docs.map((d) => d.data());
+  entries.sort((a, b) => (b.createdAt?.toMillis?.() || 0) - (a.createdAt?.toMillis?.() || 0));
+  return entries.map((e) => (kind === "followers" ? e.followerUid : e.targetUid));
 }

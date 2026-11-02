@@ -208,3 +208,10 @@ a.icon-action { color: var(--text-muted); }
 
 /* Campos visibles sobre la tarjeta de acceso */
 .admin-gate .field input { background: var(--surface-2); border-color: var(--border); }
+
+/* Servidor multimedia (túnel HTTPS) */
+.admin-section { display: flex; flex-direction: column; gap: 16px; max-width: 640px; }
+.admin-server .admin-card-body { padding-bottom: 14px; }
+.admin-server .admin-card-body b { word-break: break-all; }
+.admin-section .ghost-btn.small { display: inline-flex; align-items: center; gap: 6px; align-self: flex-start; }
+.admin-section .ghost-btn .icon { width: 16px; height: 16px; }

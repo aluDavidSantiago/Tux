@@ -31,6 +31,7 @@ export function assertVolumeMounted() {
 export async function initStorage() {
   assertVolumeMounted();
   await fsp.mkdir(USERS_DIR, { recursive: true, mode: 0o700 });
+  await removeStaleParts();
   const notice = path.join(STORAGE_ROOT, "LEEME.txt");
   if (!fs.existsSync(notice)) {
     await fsp.writeFile(notice,
@@ -60,10 +61,56 @@ export async function userUsage(uid) {
   const dir = path.join(USERS_DIR, uid);
   let total = 0;
   for (const name of await fsp.readdir(dir).catch(() => [])) {
+    if (!isValidFileName(name)) continue;
     const st = await fsp.stat(path.join(dir, name)).catch(() => null);
     if (st?.isFile()) total += st.size;
   }
   return total;
+}
+
+// Copia el flujo al archivo de salida sin pasar de maxBytes. Si se indica mime, comprueba la firma
+// con los primeros bytes. Devuelve los bytes escritos.
+function pipeLimited(stream, out, { maxBytes, mime }) {
+  let size = 0;
+  let checked = !mime;
+  let head = Buffer.alloc(0);
+
+  // Deja de guardar pero sigue drenando la petición para poder responder con el error.
+  const stopReading = () => {
+    stream.removeAllListeners("data");
+    stream.removeAllListeners("end");
+    stream.resume();
+  };
+
+  return new Promise((resolve, reject) => {
+    stream.on("data", (chunk) => {
+      size += chunk.length;
+      if (size > maxBytes) {
+        stopReading();
+        return reject(Object.assign(new Error("Archivo demasiado grande."), { status: 413 }));
+      }
+      if (!checked) {
+        head = Buffer.concat([head, chunk]);
+        if (head.length >= 12) {
+          checked = true;
+          if (!matchesSignature(mime, head)) {
+            stopReading();
+            return reject(Object.assign(new Error("El contenido no coincide con el tipo de archivo."), { status: 415 }));
+          }
+        }
+      }
+      if (!out.write(chunk)) {
+        stream.pause();
+        out.once("drain", () => stream.resume());
+      }
+    });
+    stream.on("end", () => {
+      if (!checked || size === 0) return reject(Object.assign(new Error("Archivo vacío o incompleto."), { status: 400 }));
+      out.end(() => resolve(size));
+    });
+    stream.on("error", reject);
+    out.on("error", reject);
+  });
 }
 
 // Guarda el flujo en un .part y lo renombra al final (nunca deja archivos a medias visibles).
@@ -87,47 +134,9 @@ export async function saveUpload({ uid, mime, stream, maxBytes, role = "main", m
   const finalPath = path.join(dir, fileName);
   const partPath = `${finalPath}.part`;
   const out = fs.createWriteStream(partPath, { flags: "wx", mode: 0o600 });
-  let size = 0;
-  let checked = false;
-  let head = Buffer.alloc(0);
-
-  // Deja de guardar pero sigue drenando la petición para poder responder con el error.
-  const stopReading = () => {
-    stream.removeAllListeners("data");
-    stream.removeAllListeners("end");
-    stream.resume();
-  };
-
+  let size;
   try {
-    await new Promise((resolve, reject) => {
-      stream.on("data", (chunk) => {
-        size += chunk.length;
-        if (size > maxBytes) {
-          stopReading();
-          return reject(Object.assign(new Error("Archivo demasiado grande."), { status: 413 }));
-        }
-        if (!checked) {
-          head = Buffer.concat([head, chunk]);
-          if (head.length >= 12) {
-            checked = true;
-            if (!matchesSignature(mime, head)) {
-              stopReading();
-              return reject(Object.assign(new Error("El contenido no coincide con el tipo de archivo."), { status: 415 }));
-            }
-          }
-        }
-        if (!out.write(chunk)) {
-          stream.pause();
-          out.once("drain", () => stream.resume());
-        }
-      });
-      stream.on("end", () => {
-        if (!checked) return reject(Object.assign(new Error("Archivo vacío o incompleto."), { status: 400 }));
-        out.end(resolve);
-      });
-      stream.on("error", reject);
-      out.on("error", reject);
-    });
+    size = await pipeLimited(stream, out, { maxBytes, mime });
     await fsp.rename(partPath, finalPath);
   } catch (err) {
     out.destroy();
@@ -135,6 +144,89 @@ export async function saveUpload({ uid, mime, stream, maxBytes, role = "main", m
     throw err;
   }
   return { id, fileName, size, key: `local:users/${uid}/${fileName}` };
+}
+
+/* ---------- Subidas por trozos (archivos > 100 MB a través del túnel de Cloudflare) ---------- */
+// uploadId → { uid, mime, ext, size, received, partPath, finalPath, id, touched, busy }
+const pendingUploads = new Map();
+
+const dropPending = async (uploadId) => {
+  const up = pendingUploads.get(uploadId);
+  pendingUploads.delete(uploadId);
+  if (up) await fsp.rm(up.partPath, { force: true });
+};
+
+export function expireStaleUploads(ttl) {
+  const now = Date.now();
+  for (const [uploadId, up] of pendingUploads) {
+    if (!up.busy && now - up.touched > ttl) dropPending(uploadId);
+  }
+}
+
+// Bytes reservados por subidas en curso (cuentan para la cuota).
+export const pendingBytes = (uid) =>
+  [...pendingUploads.values()].filter((u) => u.uid === uid).reduce((n, u) => n + u.size, 0);
+
+export async function beginChunkedUpload({ uid, mime, size }) {
+  const type = MEDIA_TYPES[mime];
+  if (!type) throw Object.assign(new Error("Formato no admitido. Usa JPG, PNG o MP4."), { status: 415 });
+  if (!Number.isSafeInteger(size) || size <= 0) throw Object.assign(new Error("Tamaño no válido."), { status: 400 });
+  if (size > type.max) throw Object.assign(new Error("Archivo demasiado grande."), { status: 413 });
+  const dir = await userDir(uid);
+  const id = crypto.randomUUID();
+  const finalPath = path.join(dir, `${id}.${type.ext}`);
+  const partPath = `${finalPath}.part`;
+  await fsp.writeFile(partPath, "", { flag: "wx", mode: 0o600 });
+  const uploadId = crypto.randomUUID();
+  pendingUploads.set(uploadId, {
+    uid, mime, size, received: 0, partPath, finalPath, id, fileName: path.basename(finalPath), touched: Date.now(), busy: false
+  });
+  return { uploadId };
+}
+
+// Añade un trozo en la posición offset. Al completar el tamaño declarado publica el archivo.
+// Devuelve { received, done, id?, key? }.
+export async function appendChunk({ uid, uploadId, offset, stream, chunkMax }) {
+  const up = pendingUploads.get(uploadId);
+  if (!up || up.uid !== uid) throw Object.assign(new Error("Subida no encontrada o caducada."), { status: 404 });
+  if (up.busy) throw Object.assign(new Error("Ya se está recibiendo un trozo de esta subida."), { status: 409, received: up.received });
+  if (offset !== up.received) {
+    throw Object.assign(new Error("Posición del trozo incorrecta."), { status: 409, received: up.received });
+  }
+  up.busy = true;
+  up.touched = Date.now();
+  const out = fs.createWriteStream(up.partPath, { flags: "a" });
+  try {
+    const written = await pipeLimited(stream, out, {
+      maxBytes: Math.min(chunkMax, up.size - up.received),
+      mime: offset === 0 ? up.mime : null
+    });
+    up.received += written;
+  } catch (err) {
+    out.destroy();
+    // Trozo fallido: se recorta lo escrito para que el cliente pueda reintentar desde la misma posición.
+    await fsp.truncate(up.partPath, up.received).catch(() => {});
+    if (err.status === 415) await dropPending(uploadId);
+    throw Object.assign(err, { received: up.received });
+  } finally {
+    up.busy = false;
+    up.touched = Date.now();
+  }
+  if (up.received < up.size) return { received: up.received, done: false };
+  await fsp.rename(up.partPath, up.finalPath);
+  pendingUploads.delete(uploadId);
+  return { received: up.received, done: true, id: up.id, size: up.size, key: `local:users/${uid}/${up.fileName}` };
+}
+
+// Al arrancar no hay subidas en curso: se limpian los .part que dejara un cierre brusco.
+async function removeStaleParts() {
+  for (const uid of await fsp.readdir(USERS_DIR).catch(() => [])) {
+    if (!isValidUid(uid)) continue;
+    const dir = path.join(USERS_DIR, uid);
+    for (const name of await fsp.readdir(dir).catch(() => [])) {
+      if (name.endsWith(".part")) await fsp.rm(path.join(dir, name), { force: true });
+    }
+  }
 }
 
 // Ruta absoluta de un archivo servible, o null si no es válida / no existe.
