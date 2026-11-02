@@ -1,7 +1,7 @@
 // Módulo de actividades (TuxPlans): catálogo de opciones, lectura en tiempo real y publicación.
 // Documento activities/{id}:
 //   { title, description, emoji, imageUrl, category, budget, effort, when, duration,
-//     authorId, authorName, likeCount, commentCount, createdAt }
+//     authorId, authorName, likeCount, commentCount, createdAt, seed? }
 import {
   collection,
   doc,
@@ -14,6 +14,7 @@ import {
   limit,
   onSnapshot,
   getDocs,
+  writeBatch,
   serverTimestamp
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { db } from "./firebaseConfig.js";
@@ -101,6 +102,52 @@ export function createActivity(data, user, profile) {
 }
 
 export const deleteActivity = (id) => deleteDoc(doc(db, "activities", id));
+
+/* ---------- Herramientas de desarrollo: planes de prueba ---------- */
+const PANO = "https://cdn.aframe.io/360-image-gallery-boilerplate/img";
+const SEED_TEMPLATES = [
+  { title: "Mirador al amanecer", description: "Sube antes de que salga el sol y mira cómo se enciende la ciudad.", category: "chill", budget: "free", effort: "mid", when: "day", duration: "1 h", imageUrl: `${PANO}/sechelt.jpg` },
+  { title: "Ruta urbana en 360°", description: "Recorre tu barrio y captura una esquina en 360°.", category: "aventura", budget: "free", effort: "mid", when: "weekend", duration: "2 h", imageUrl: `${PANO}/city.jpg` },
+  { title: "Instalación inmersiva", description: "Busca una sala de arte con instalaciones y explórala con calma.", category: "cultura", budget: "low", effort: "low", when: "weekend", duration: "1 h", imageUrl: `${PANO}/cubes.jpg` },
+  { title: "Desayuno en una terraza", description: "Pide algo que nunca hayas probado y lee el periódico sin prisa.", category: "gastronomia", budget: "low", effort: "low", when: "day", duration: "1 h", imageUrl: "" },
+  { title: "Paseo nocturno sin móvil", description: "Treinta minutos caminando de noche sin mirar la pantalla.", category: "nocturno", budget: "free", effort: "low", when: "night", duration: "30 min", imageUrl: "" },
+  { title: "Mercado de segunda mano", description: "Encuentra un objeto curioso por menos de 5 €.", category: "cultura", budget: "low", effort: "mid", when: "weekend", duration: "2 h", imageUrl: "" },
+  { title: "Picnic de 15 minutos", description: "Una fruta, un banco al sol y nada más.", category: "chill", budget: "free", effort: "low", when: "day", duration: "15 min", imageUrl: "" },
+  { title: "Cena con receta nueva", description: "Elige una receta de otro país y cocínala con lo que tengas.", category: "gastronomia", budget: "mid", effort: "mid", when: "night", duration: "2 h", imageUrl: "" },
+  { title: "Bici hasta el río", description: "Pedalea hasta el agua más cercana y vuelve por otra ruta.", category: "aventura", budget: "free", effort: "high", when: "day", duration: "2 h", imageUrl: "" },
+  { title: "Concierto pequeño", description: "Busca un directo en un local pequeño esta noche.", category: "nocturno", budget: "high", effort: "low", when: "night", duration: "2 h", imageUrl: "" },
+  { title: "Museo gratuito", description: "Entra en un museo el día de entrada libre y elige una sola sala.", category: "cultura", budget: "free", effort: "low", when: "weekend", duration: "1 h", imageUrl: "" },
+  { title: "Escalada en rocódromo", description: "Prueba una sesión de iniciación en el rocódromo de tu zona.", category: "aventura", budget: "mid", effort: "high", when: "weekend", duration: "Medio día", imageUrl: "" }
+];
+
+// Crea hasta `count` planes de prueba (marcados con seed: true) que el usuario aún no tenga.
+export async function seedActivities(user, profile, count = 6) {
+  const existing = new Set((await getActivitiesByAuthor(user.uid)).map((a) => a.title));
+  const pool = SEED_TEMPLATES.filter((t) => !existing.has(t.title)).sort(() => Math.random() - 0.5).slice(0, count);
+  const batch = writeBatch(db);
+  for (const t of pool) {
+    batch.set(doc(activitiesCol), {
+      ...t,
+      emoji: CATEGORIES[t.category].emoji,
+      authorId: user.uid,
+      authorName: profile?.nickname || user.displayName || "Tux",
+      likeCount: 0,
+      commentCount: 0,
+      seed: true,
+      createdAt: serverTimestamp()
+    });
+  }
+  if (pool.length) await batch.commit();
+  return pool.length;
+}
+
+export async function deleteSeedActivities(uid) {
+  const seeds = (await getActivitiesByAuthor(uid)).filter((a) => a.seed);
+  const batch = writeBatch(db);
+  seeds.forEach((a) => batch.delete(doc(db, "activities", a.id)));
+  if (seeds.length) await batch.commit();
+  return seeds.length;
+}
 
 // Filtros: cada grupo es un Set; vacío = sin restricción.
 export function matchesFilters(a, f) {

@@ -150,6 +150,29 @@ export function resolveMediaFile(uid, fileName) {
   }
 }
 
+// Borrado controlado (vía API autenticada): el archivo principal arrastra su miniatura.
+// Devuelve el número de archivos eliminados; es idempotente (0 si ya no existían).
+export async function deleteMediaFile(uid, fileName) {
+  if (!isValidUid(uid) || !isValidFileName(fileName)) {
+    throw Object.assign(new Error("Archivo no válido."), { status: 400 });
+  }
+  const dir = path.join(USERS_DIR, uid);
+  const targets = [fileName];
+  if (fileName.endsWith(".mp4")) targets.push(fileName.replace(/\.mp4$/, ".thumb.jpg"));
+  let removed = 0;
+  for (const name of targets) {
+    const full = path.join(dir, name);
+    if (!full.startsWith(USERS_DIR + path.sep)) continue;
+    try {
+      await fsp.unlink(full);
+      removed++;
+    } catch (err) {
+      if (err.code !== "ENOENT") throw err;
+    }
+  }
+  return removed;
+}
+
 /* ---------- Solo administración (admin.js) ---------- */
 export async function listUsers() {
   const result = [];

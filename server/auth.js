@@ -6,6 +6,25 @@ const JWKS = createRemoteJWKSet(
   new URL("https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com")
 );
 
+// ¿Es admin? Se consulta admins/{uid} en Firestore con el propio token del usuario
+// (las reglas solo dejan leer el documento propio).
+const adminCache = new Map();
+export async function isAdminToken(token, uid) {
+  const cached = adminCache.get(uid);
+  // Positivos 5 min; negativos 30 s (para que dar de alta un admin surta efecto enseguida).
+  if (cached && Date.now() - cached.at < (cached.value ? 300000 : 30000)) return cached.value;
+  const url = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents/admins/${encodeURIComponent(uid)}`;
+  let value = false;
+  try {
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+    value = res.ok;
+  } catch {
+    value = false;
+  }
+  adminCache.set(uid, { value, at: Date.now() });
+  return value;
+}
+
 // Devuelve el uid del usuario autenticado o lanza un error 401.
 export async function verifyFirebaseToken(token) {
   if (!token) throw Object.assign(new Error("Falta el token de sesión."), { status: 401 });

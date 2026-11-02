@@ -20,11 +20,12 @@ export const ALLOWED_ORIGINS = new Set([
 ]);
 
 // Tipos admitidos: firma binaria ("magic bytes") + límite de tamaño.
+// Límites pensados para exportaciones 360° de Insta360 (fotos de 70+ MP, vídeo 5.7K).
 export const MEDIA_TYPES = {
-  "image/jpeg": { ext: "jpg", max: 10 * MB },
-  "image/png": { ext: "png", max: 10 * MB },
-  "video/mp4": { ext: "mp4", max: 100 * MB }
+  "image/jpeg": { ext: "jpg", max: 50 * MB },
+  "image/png": { ext: "png", max: 50 * MB },
+  "video/mp4": { ext: "mp4", max: 500 * MB }
 };
 export const THUMB_MAX = 2 * MB;
-export const USER_QUOTA = 5 * 1024 * MB;
+export const USER_QUOTA = 20 * 1024 * MB;
 export const UPLOADS_PER_MINUTE = 20;

@@ -1,0 +1,424 @@
+// Tux · panel de administración: pruebas multimedia, planes, usuarios y notificaciones.
+// La interfaz solo se muestra a admins, pero los permisos reales los imponen las reglas de
+// Firestore (admins/{uid}) y el servidor del HDD.
+import { CATEGORIES, millis } from "../../src/activities.js";
+import { signInWithGoogle, signInWithEmail, logOut, watchSession, authErrorMessage } from "../../src/auth.js";
+import {
+  isAdminUser, listProofs, listActivities, listUsers, listSentNotifications,
+  adminRemoveProofMedia, adminDeleteProof, adminDeleteActivity, sendNotification
+} from "../../src/admin.js";
+import { resolveMediaUrl, mediaThumbUrl, isEquirectangular, checkMediaServer } from "../../src/media.js";
+import { NOTIFICATION_KINDS } from "../../src/notifications.js";
+import { $, h, svgUse, tuxLogo, timeAgo, toast, setLoading, initModals, confirmDialog } from "../js/ui.js";
+import { initViewer, openViewer } from "../js/viewer.js";
+
+const NOTIFY_TEMPLATES = {
+  "360": {
+    kind: "360",
+    title: "Cómo subir tus fotos y vídeos 360°",
+    body: "Para que tu prueba se vea en la Galería VR, súbela en formato equirectangular (proporción 2:1). " +
+      "En Insta360 Studio o la app de Insta360 usa «Exportar» → «Foto/Vídeo 360°» (no «reencuadrado» ni «plano»). " +
+      "Los archivos exportados así (por ejemplo 6080×3040 o 5760×2880) se abren automáticamente en el visor inmersivo."
+  },
+  removed: {
+    kind: "warning",
+    title: "Hemos retirado una de tus pruebas",
+    body: "Una de tus pruebas multimedia no cumplía el formato y la hemos retirado. Tu plan vuelve a estar «En curso»: " +
+      "puedes subir una nueva prueba desde Mis planes cuando quieras."
+  }
+};
+
+const state = {
+  user: null,
+  tab: "proofs",
+  proofFilter: "all",
+  proofs: [],
+  activities: [],
+  users: [],
+  sent: [],
+  storageOk: null,
+  notifyTo: "all"
+};
+
+const main = $("#admin-main");
+initModals();
+initViewer();
+
+const userName = (uid) => state.users.find((u) => u.id === uid)?.nickname || uid.slice(0, 8);
+const fmtDate = (ts) => (millis(ts) ? new Date(millis(ts)).toLocaleDateString("es", { day: "numeric", month: "short", year: "numeric" }) : "—");
+
+/* ---------- Acceso ---------- */
+function renderGate(message) {
+  const error = h("p", { class: "form-error", role: "alert" });
+  const form = h("form", { class: "form", novalidate: true },
+    h("label", { class: "field" }, h("span", { text: "Email" }), h("input", { type: "email", name: "email", autocomplete: "email", required: true })),
+    h("label", { class: "field" }, h("span", { text: "Contraseña" }), h("input", { type: "password", name: "password", autocomplete: "current-password", required: true })),
+    error,
+    h("button", { class: "primary-btn", type: "submit" }, "Entrar")
+  );
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    try {
+      await signInWithEmail(form.email.value, form.password.value);
+    } catch (err) {
+      error.textContent = authErrorMessage(err);
+    }
+  });
+  main.replaceChildren(h("section", { class: "admin-gate" },
+    tuxLogo("gate-mark"),
+    h("h1", { text: "Panel de administración" }),
+    h("p", { class: "gate-sub", text: message || "Inicia sesión con una cuenta de administrador." }),
+    h("button", {
+      class: "google-btn", type: "button",
+      onclick: async () => {
+        try {
+          await signInWithGoogle();
+        } catch (err) {
+          error.textContent = authErrorMessage(err);
+        }
+      }
+    }, "Continuar con Google"),
+    h("div", { class: "divider" }, h("span", { text: "o con tu email" })),
+    form
+  ));
+}
+
+function renderRestricted(user) {
+  main.replaceChildren(h("section", { class: "admin-gate" },
+    h("div", { class: "confirm-icon danger" }, svgUse("i-shield")),
+    h("h1", { text: "Acceso restringido" }),
+    h("p", { class: "gate-sub", text: "Esta cuenta no es administradora de Tux." }),
+    h("div", { class: "gate-steps" },
+      h("p", { text: "Para darte de alta como admin:" }),
+      h("ol", {},
+        h("li", { text: "Abre la consola de Firebase → Firestore Database." }),
+        h("li", {}, "Crea la colección ", h("code", { text: "admins" }), " (si no existe)."),
+        h("li", {}, "Añade un documento cuyo ID sea tu UID y un campo ", h("code", { text: "role = \"admin\"" }), "."),
+        h("li", { text: "Recarga esta página." })
+      ),
+      h("div", { class: "uid-row" },
+        h("span", {}, h("small", { text: "Tu UID" }), h("code", { text: user.uid })),
+        h("button", { class: "icon-action", type: "button", "aria-label": "Copiar UID", onclick: () => navigator.clipboard.writeText(user.uid).then(() => toast("UID copiado")) }, svgUse("i-copy"))
+      )
+    ),
+    h("button", { class: "ghost-btn", type: "button", onclick: () => logOut() }, "Cambiar de cuenta")
+  ));
+}
+
+function renderUserChip() {
+  const box = $("#admin-user");
+  if (!state.user) return box.replaceChildren();
+  box.replaceChildren(
+    h("span", { class: "admin-user-name", text: state.user.email || state.user.displayName || "Admin" }),
+    h("button", { class: "icon-action", type: "button", "aria-label": "Cerrar sesión", onclick: () => logOut() }, svgUse("i-logout"))
+  );
+}
+
+watchSession(async (user) => {
+  state.user = user;
+  renderUserChip();
+  if (!user) return renderGate();
+  main.replaceChildren(h("div", { class: "admin-loading" }, tuxLogo("loading-mark")));
+  if (!(await isAdminUser(user.uid))) return renderRestricted(user);
+  await loadAll();
+});
+
+/* ---------- Datos ---------- */
+async function loadAll() {
+  try {
+    const [proofs, activities, users, sent, storage] = await Promise.all([
+      listProofs(), listActivities(), listUsers(), listSentNotifications().catch(() => []), checkMediaServer()
+    ]);
+    Object.assign(state, { proofs, activities, users, sent, storageOk: storage.ok });
+    render();
+  } catch (err) {
+    console.error(err);
+    main.replaceChildren(h("p", { class: "list-empty", text: `No se pudieron cargar los datos: ${err.message}` }));
+  }
+}
+
+/* ---------- Estructura ---------- */
+const TABS = [
+  { id: "proofs", label: "Pruebas multimedia" },
+  { id: "plans", label: "Planes" },
+  { id: "users", label: "Usuarios" },
+  { id: "notify", label: "Notificaciones" }
+];
+
+function statCard(value, label, accent = false) {
+  return h("div", { class: `admin-stat${accent ? " accent" : ""}` }, h("b", { text: value }), h("span", { text: label }));
+}
+
+function render() {
+  const p360 = state.proofs.filter((p) => p.is360).length;
+  const views = { proofs: renderProofs, plans: renderPlans, users: renderUsers, notify: renderNotify };
+  main.replaceChildren(
+    h("section", { class: "admin-stats" },
+      statCard(state.users.length, "Usuarios"),
+      statCard(state.activities.length, "Planes publicados"),
+      statCard(state.proofs.length, "Pruebas"),
+      statCard(p360, "Pruebas 360°", true),
+      h("div", { class: `admin-stat storage ${state.storageOk ? "ok" : "off"}` },
+        h("b", { text: state.storageOk ? "HDD conectado" : "HDD no disponible" }),
+        h("span", { text: "Servidor de almacenamiento" }))
+    ),
+    h("nav", { class: "tab-chips admin-tabs", role: "tablist" },
+      TABS.map((t) => h("button", {
+        type: "button", role: "tab", class: `tab-chip${t.id === state.tab ? " is-active" : ""}`,
+        onclick: () => { state.tab = t.id; render(); }
+      }, t.label)),
+      h("button", { class: "tab-chip refresh", type: "button", "aria-label": "Recargar", onclick: loadAll }, svgUse("i-refresh"))
+    ),
+    views[state.tab]()
+  );
+}
+
+/* ---------- Pruebas multimedia ---------- */
+const PROOF_FILTERS = [
+  { id: "all", label: "Todas", test: () => true },
+  { id: "360", label: "360°", test: (p) => p.is360 },
+  { id: "flat", label: "Planas", test: (p) => !p.is360 },
+  { id: "video", label: "Vídeo", test: (p) => p.type === "video" },
+  { id: "suspect", label: "A revisar", test: (p) => proofWarning(p) }
+];
+
+// Incoherencias entre la marca 360° y la proporción real del archivo.
+function proofWarning(p) {
+  const equi = isEquirectangular(p.width, p.height);
+  if (!p.is360 && equi) return "Parece 360° (2:1) pero está marcada como plana";
+  if (p.is360 && p.width && !equi) return "Marcada como 360° pero no es 2:1";
+  return "";
+}
+
+async function guarded(button, action, success) {
+  setLoading(button, true);
+  try {
+    await action();
+    toast(success);
+    await loadAll();
+  } catch (err) {
+    console.error(err);
+    toast(err.message || "La operación ha fallado.");
+    setLoading(button, false);
+  }
+}
+
+function proofCard(p) {
+  const warning = proofWarning(p);
+  const thumb = mediaThumbUrl(p) || resolveMediaUrl(p.url);
+  const view = () => openViewer({
+    url: resolveMediaUrl(p.url), type: p.type, is360: p.is360, title: p.activityTitle,
+    sub: `@${p.authorName} · ${p.width}×${p.height}`
+  });
+  return h("article", { class: "admin-card" },
+    h("button", { class: "admin-thumb", type: "button", "aria-label": "Previsualizar", onclick: view },
+      thumb ? h("img", { src: thumb, alt: "", loading: "lazy" }) : h("span", { class: "thumb-empty" }, svgUse("i-image-off")),
+      h("span", { class: "thumb-badges" },
+        p.is360 && h("span", { class: "badge-360" }, svgUse("i-orbit"), "360°"),
+        p.type === "video" && h("span", { class: "badge-360" }, "Vídeo")
+      )
+    ),
+    h("div", { class: "admin-card-body" },
+      h("b", { text: p.activityTitle }),
+      h("small", { text: `@${p.authorName} · ${timeAgo(p.createdAt)} · ${p.width}×${p.height}` }),
+      p.caption && h("p", { class: "admin-caption", text: `“${p.caption}”` }),
+      warning && h("span", { class: "admin-warning", text: warning })
+    ),
+    h("div", { class: "admin-actions" },
+      h("button", { class: "ghost-btn small", type: "button", onclick: view }, svgUse("i-eye"), "Ver"),
+      h("button", {
+        class: "ghost-btn small", type: "button",
+        onclick: async (e) => {
+          const btn = e.currentTarget;
+          const ok = await confirmDialog({
+            title: "Quitar solo la prueba",
+            message: `Se borrará el archivo del HDD y el registro. El plan de @${p.authorName} volverá a «En curso».`,
+            confirmLabel: "Quitar prueba", icon: "i-image-off"
+          });
+          if (ok) guarded(btn, () => adminRemoveProofMedia(p, state.user), "Prueba retirada");
+        }
+      }, svgUse("i-image-off"), "Quitar prueba"),
+      h("button", {
+        class: "ghost-btn small danger", type: "button",
+        onclick: async (e) => {
+          const btn = e.currentTarget;
+          const ok = await confirmDialog({
+            title: "Eliminar publicación",
+            message: "Se borrará el archivo físico del HDD, el registro de la prueba y su entrada en el historial del usuario.",
+            confirmLabel: "Eliminar"
+          });
+          if (ok) guarded(btn, () => adminDeleteProof(p, state.user), "Publicación eliminada");
+        }
+      }, svgUse("i-trash"), "Eliminar"),
+      h("button", {
+        class: "icon-action", type: "button", "aria-label": "Notificar al autor",
+        onclick: () => prefillNotify(p.uid, warning ? "360" : "removed")
+      }, svgUse("i-bell"))
+    )
+  );
+}
+
+function renderProofs() {
+  const filter = PROOF_FILTERS.find((f) => f.id === state.proofFilter);
+  const items = state.proofs.filter(filter.test);
+  return h("section", {},
+    h("div", { class: "chips admin-filters" }, PROOF_FILTERS.map((f) => h("button", {
+      class: `chip${f.id === state.proofFilter ? " is-active" : ""}`, type: "button",
+      onclick: () => { state.proofFilter = f.id; render(); }
+    }, f.label, h("small", { text: String(state.proofs.filter(f.test).length) })))),
+    items.length
+      ? h("div", { class: "admin-grid" }, items.map(proofCard))
+      : h("p", { class: "list-empty", text: "No hay pruebas con este filtro." })
+  );
+}
+
+/* ---------- Planes ---------- */
+function renderPlans() {
+  if (!state.activities.length) return h("p", { class: "list-empty", text: "No hay planes publicados." });
+  return h("div", { class: "admin-table" },
+    h("div", { class: "admin-tr head" }, ["Plan", "Autor", "Vibe", "Apuntados", "Comentarios", "Fecha", ""].map((t) => h("span", { text: t }))),
+    state.activities.map((a) => h("div", { class: "admin-tr" },
+      h("span", { class: "cell-title" }, h("b", { text: a.title }), a.seed && h("span", { class: "reason-chip", text: "prueba" })),
+      h("span", { "data-label": "Autor", text: `@${a.authorName || userName(a.authorId)}` }),
+      h("span", { "data-label": "Vibe", text: CATEGORIES[a.category]?.label || a.category }),
+      h("span", { "data-label": "Apuntados", text: String(a.likeCount || 0) }),
+      h("span", { "data-label": "Comentarios", text: String(a.commentCount || 0) }),
+      h("span", { "data-label": "Fecha", text: fmtDate(a.createdAt) }),
+      h("span", { class: "cell-actions" },
+        h("a", { class: "icon-action", href: `../#plan=${a.id}`, target: "_blank", rel: "noopener", "aria-label": "Abrir en Tux" }, svgUse("i-external")),
+        h("button", {
+          class: "ghost-btn small danger", type: "button",
+          onclick: async (e) => {
+            const btn = e.currentTarget;
+            const ok = await confirmDialog({
+              title: "Eliminar publicación",
+              message: `"${a.title}" desaparecerá del feed para todos los usuarios.`,
+              confirmLabel: "Eliminar"
+            });
+            if (ok) guarded(btn, () => adminDeleteActivity(a.id), "Plan eliminado");
+          }
+        }, svgUse("i-trash"), "Eliminar")
+      )
+    ))
+  );
+}
+
+/* ---------- Usuarios ---------- */
+function renderUsers() {
+  if (!state.users.length) return h("p", { class: "list-empty", text: "No hay usuarios registrados." });
+  const proofsBy = (uid) => state.proofs.filter((p) => p.uid === uid).length;
+  const plansBy = (uid) => state.activities.filter((a) => a.authorId === uid).length;
+  const users = [...state.users].sort((a, b) => millis(b.createdAt) - millis(a.createdAt));
+  return h("div", { class: "admin-table users" },
+    h("div", { class: "admin-tr head" }, ["Usuario", "UID", "Registro", "Pruebas", "Planes", ""].map((t) => h("span", { text: t }))),
+    users.map((u) => h("div", { class: "admin-tr" },
+      h("span", { class: "cell-title" },
+        h("span", { class: "avatar mini", dataset: { color: u.avatarColor || "orange" } }, tuxLogo("avatar-tux")),
+        h("b", { text: u.nickname || "—" })),
+      h("span", { "data-label": "UID", class: "cell-uid" },
+        h("code", { text: u.id }),
+        h("button", { class: "icon-action", type: "button", "aria-label": "Copiar UID", onclick: () => navigator.clipboard.writeText(u.id).then(() => toast("UID copiado")) }, svgUse("i-copy"))),
+      h("span", { "data-label": "Registro", text: fmtDate(u.createdAt) }),
+      h("span", { "data-label": "Pruebas", text: String(proofsBy(u.id)) }),
+      h("span", { "data-label": "Planes", text: String(plansBy(u.id)) }),
+      h("span", { class: "cell-actions" },
+        h("button", { class: "ghost-btn small", type: "button", onclick: () => prefillNotify(u.id) }, svgUse("i-bell"), "Notificar"))
+    ))
+  );
+}
+
+/* ---------- Notificaciones ---------- */
+let notifyDraft = { kind: "info", title: "", body: "" };
+
+function prefillNotify(uid, template) {
+  state.notifyTo = uid;
+  if (template) notifyDraft = { ...NOTIFY_TEMPLATES[template] };
+  state.tab = "notify";
+  render();
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+function renderNotify() {
+  const form = h("form", { class: "form admin-notify", novalidate: true });
+  const toSelect = h("select", { name: "to", class: "admin-select" },
+    h("option", { value: "all", text: `Todos los usuarios (${state.users.length})` }),
+    state.users.map((u) => h("option", { value: u.id, text: `${u.nickname || "—"} · ${u.id.slice(0, 8)}…` }))
+  );
+  toSelect.value = state.notifyTo;
+  const kindSelect = h("select", { name: "kind", class: "admin-select" },
+    Object.entries(NOTIFICATION_KINDS).map(([value, k]) => h("option", { value, text: `${k.emoji} ${k.label}` })));
+  kindSelect.value = notifyDraft.kind;
+  const title = h("input", { type: "text", name: "title", maxlength: "80", required: true, value: notifyDraft.title });
+  const body = h("textarea", { name: "body", maxlength: "1000", rows: "5", required: true });
+  body.value = notifyDraft.body;
+  const error = h("p", { class: "form-error", role: "alert" });
+  const submit = h("button", { class: "primary-btn", type: "submit" }, svgUse("i-send"), "Enviar notificación");
+
+  const useTemplate = (key) => {
+    notifyDraft = { ...NOTIFY_TEMPLATES[key] };
+    kindSelect.value = notifyDraft.kind;
+    title.value = notifyDraft.title;
+    body.value = notifyDraft.body;
+  };
+
+  form.append(
+    h("div", { class: "admin-templates" },
+      h("span", { text: "Plantillas:" }),
+      h("button", { class: "chip", type: "button", onclick: () => useTemplate("360") }, "🌐 Formato 360° equirectangular"),
+      h("button", { class: "chip", type: "button", onclick: () => useTemplate("removed") }, "⚠️ Prueba retirada")
+    ),
+    h("label", { class: "field" }, h("span", { text: "Destinatario" }), toSelect),
+    h("label", { class: "field" }, h("span", { text: "Tipo" }), kindSelect),
+    h("label", { class: "field" }, h("span", { text: "Título" }), title),
+    h("label", { class: "field" }, h("span", { text: "Mensaje" }), body),
+    error,
+    submit
+  );
+  form.addEventListener("input", () => {
+    notifyDraft = { kind: kindSelect.value, title: title.value, body: body.value };
+    state.notifyTo = toSelect.value;
+  });
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (!title.value.trim() || !body.value.trim()) return (error.textContent = "Completa el título y el mensaje.");
+    const toUids = toSelect.value === "all" ? state.users.map((u) => u.id) : [toSelect.value];
+    if (toSelect.value === "all") {
+      const ok = await confirmDialog({
+        title: "Enviar a todos", message: `Se enviará a ${toUids.length} usuarios.`,
+        confirmLabel: "Enviar", danger: false, icon: "i-bell"
+      });
+      if (!ok) return;
+    }
+    setLoading(submit, true);
+    try {
+      const sent = await sendNotification({
+        toUids, title: title.value, body: body.value, kind: kindSelect.value,
+        fromName: "Equipo Tux"
+      });
+      notifyDraft = { kind: "info", title: "", body: "" };
+      toast(`Notificación enviada a ${sent} usuario${sent === 1 ? "" : "s"}`);
+      await loadAll();
+    } catch (err) {
+      console.error(err);
+      error.textContent = err.message || "No se pudo enviar.";
+      setLoading(submit, false);
+    }
+  });
+
+  const sentList = state.sent.length
+    ? h("ul", { class: "notification-list" }, state.sent.map((n) => {
+        const kind = NOTIFICATION_KINDS[n.kind] || NOTIFICATION_KINDS.info;
+        return h("li", { class: "notification" },
+          h("span", { class: "notification-icon", text: kind.emoji }),
+          h("div", { class: "notification-body" },
+            h("div", { class: "notification-head" }, h("b", { text: n.title }), h("time", { text: timeAgo(n.createdAt) })),
+            h("small", { text: `Para ${userName(n.toUid)} · ${n.read ? "Leída" : "Sin leer"}` })
+          ));
+      }))
+    : h("p", { class: "list-empty", text: "Aún no se han enviado notificaciones." });
+
+  return h("div", { class: "admin-columns" },
+    h("section", { class: "settings-card" }, h("h3", { text: "Enviar notificación" }), form),
+    h("section", { class: "settings-card" }, h("h3", { text: "Enviadas recientemente" }), sentList)
+  );
+}

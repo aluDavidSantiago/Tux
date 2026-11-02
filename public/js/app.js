@@ -3,7 +3,7 @@
 import {
   CATEGORIES, BUDGETS, EFFORTS, WHEN, DURATIONS, SAMPLE_ACTIVITIES,
   watchActivities, getActivity, getActivitiesByAuthor, createActivity, deleteActivity,
-  matchesFilters, normalize, millis, isValidImageUrl
+  seedActivities, deleteSeedActivities, matchesFilters, normalize, millis, isValidImageUrl
 } from "../../src/activities.js";
 import {
   signInWithGoogle, completeRedirectSignIn, signInWithEmail, signUpWithEmail, resetPassword, logOut,
@@ -14,20 +14,23 @@ import {
   watchLikes, watchSaved, setLike, setSaved, watchComments, addComment, deleteComment
 } from "../../src/social.js";
 import {
-  FREQUENCIES, DISCARD_REASONS, normalizePrefs, savePrefs, saveStar, watchHistory, setHistory, restoreFromTrash
+  FREQUENCIES, DISCARD_REASONS, normalizePrefs, savePrefs, saveStar, watchHistory, setHistory, restoreFromTrash,
+  removeProofFromHistory
 } from "../../src/plans.js";
 import { currentPeriod, msUntilNextPeriod, pickStar, scoreActivity } from "../../src/recommendations.js";
 import {
-  ACCEPT_ATTR, validateFile, probeMedia, isEquirectangular, uploadMedia, checkMediaServer,
-  resolveMediaUrl, mediaThumbUrl, createProof, watchVrProofs, SAMPLE_VR
+  ACCEPT_ATTR, LIMITS_LABEL, validateFile, probeMedia, isEquirectangular, detectSphericalMetadata, uploadMedia,
+  checkMediaServer, resolveMediaUrl, mediaThumbUrl, createProof, deleteMediaRef, deleteProofDoc, watchVrProofs, SAMPLE_VR
 } from "../../src/media.js";
+import { NOTIFICATION_KINDS, watchNotifications, markAllRead, deleteNotification } from "../../src/notifications.js";
+import { isAdminUser } from "../../src/admin.js";
 import {
   $, $$, h, svgUse, tuxLogo, formatCount, timeAgo, formatCountdown, toast, setLoading, setThumb,
-  openModal, closeModal, initModals
+  openModal, closeModal, initModals, confirmDialog
 } from "./ui.js";
-import { mountVrScene } from "./vr.js";
+import { initViewer, openViewer } from "./viewer.js";
 
-export const APP_VERSION = "1.0.0-beta";
+export const APP_VERSION = "1.1.0-beta";
 
 /* ==========================================================
    Estado
@@ -45,6 +48,8 @@ const state = {
   saved: [],
   myPlans: [],
   vr: [],
+  isAdmin: false,
+  notifications: [],
   filters: { budget: new Set(), effort: new Set(), category: new Set(), when: new Set(), search: "" },
   view: "dashboard",
   plansTab: "accepted",
@@ -247,7 +252,7 @@ watchSession((user) => {
   sessionUnsubs = [];
   Object.assign(state, {
     user, profile: null, profileLoaded: false, history: new Map(), historyLoaded: false, guestStar: null,
-    liked: new Set(), saved: [], myPlans: []
+    liked: new Set(), saved: [], myPlans: [], isAdmin: false, notifications: []
   });
 
   if (user) {
@@ -270,13 +275,24 @@ watchSession((user) => {
       watchSaved(user.uid, (ids) => {
         state.saved = ids;
         onDataChange();
+      }),
+      watchNotifications(user.uid, (items) => {
+        state.notifications = items;
+        renderBell();
+        if (notificationsModal.open) renderNotifications();
       })
     );
+    isAdminUser(user.uid).then((value) => {
+      if (state.user?.uid !== user.uid) return;
+      state.isAdmin = value;
+      onDataChange();
+    });
     loadMyPlans();
   } else if (state.view === "plans") {
     setView("dashboard");
   }
   renderFeed(true);
+  renderBell();
   onDataChange();
 });
 
@@ -510,11 +526,16 @@ async function sharePlan(a) {
 }
 
 async function removePlan(a) {
-  if (!confirm(`¿Borrar "${a.title}"? Esta acción no se puede deshacer.`)) return;
+  const ok = await confirmDialog({
+    title: "Eliminar publicación",
+    message: `"${a.title}" desaparecerá del feed para todos. Esta acción no se puede deshacer.`,
+    confirmLabel: "Eliminar"
+  });
+  if (!ok) return;
   try {
     await deleteActivity(a.id);
     closeModal($("#plan-modal"));
-    toast("Plan borrado");
+    toast("Publicación eliminada");
     loadMyPlans();
   } catch (err) {
     console.error(err);
@@ -777,6 +798,7 @@ async function loadMyPlans() {
     console.warn("Tux: no se pudieron cargar tus planes.", err);
   }
   if ($("#profile-modal").open) renderProfile();
+  if (state.view === "plans") renderPlans();
 }
 
 const profileModal = $("#profile-modal");
@@ -960,7 +982,18 @@ function starCard(star, prefs) {
     );
   } else if (status === "completed") {
     body.append(h("p", { class: "star-status" }, h("span", { class: "status-dot done" }), "Completado · ¡bien hecho!"));
-    if (entry?.proofUrl) body.append(proofThumb(entry, a.title));
+    if (entry?.proofUrl) {
+      body.append(
+        proofThumb(entry, a.title),
+        h("div", { class: "star-actions two" },
+          h("button", { class: "ghost-btn", type: "button", onclick: () => openComplete(a, { replace: entry }) }, "Reemplazar prueba"),
+          h("button", { class: "ghost-btn", type: "button", onclick: () => removeProof(entry) }, "Quitar prueba")
+        )
+      );
+    }
+  }
+  if (state.user && a.authorId === state.user.uid && !a.sample) {
+    body.append(h("button", { class: "link-btn danger star-delete", type: "button", onclick: () => removePlan(a) }, "Eliminar mi publicación"));
   }
   body.append(h("p", { class: "star-foot" }, svgUse("i-clock"),
     h("span", { id: "star-countdown", text: countdownText(prefs.frequencyDays) })));
@@ -1015,6 +1048,7 @@ async function acceptPlan(a) {
 const PLAN_TABS = [
   { id: "accepted", label: "En curso", empty: "Acepta tu actividad estrella en el Panel y aparecerá aquí hasta que la completes." },
   { id: "completed", label: "Completados", empty: "Completa un plan con una foto o vídeo y quedará guardado aquí." },
+  { id: "published", label: "Publicados", empty: "Aún no has publicado planes. Comparte el primero desde el Panel." },
   { id: "saved", label: "Guardados", empty: "Guarda planes desde el feed de exploración para tenerlos a mano." },
   { id: "discarded", label: "Papelera", empty: "La papelera está vacía. Los planes descartados no se vuelven a sugerir hasta que los restaures." }
 ];
@@ -1032,25 +1066,27 @@ function renderPlans() {
     return;
   }
   const tab = state.plansTab;
-  const entries = tab === "saved"
-    ? state.saved
+  const entries = tab === "saved" ? state.saved
+    : tab === "published" ? state.myPlans.map((a) => [a.id, a.title, a.likeCount, a.commentCount])
     : historyOf(tab).map((e) => [e.activityId, e.status, millis(e.updatedAt), e.proofUrl]);
   if (!memo("plans", JSON.stringify([tab, entries, state.feedReady]))) return;
 
-  const tabs = h("div", { class: "segmented four plans-tabs", role: "tablist" },
+  const counts = {
+    accepted: historyOf("accepted").length, completed: historyOf("completed").length,
+    published: state.myPlans.length, saved: state.saved.length, discarded: historyOf("discarded").length
+  };
+  const tabs = h("div", { class: "tab-chips", role: "tablist" },
     PLAN_TABS.map((t) => h("button", {
-      type: "button", role: "tab", class: t.id === tab ? "is-active" : "", "aria-selected": String(t.id === tab),
+      type: "button", role: "tab", class: `tab-chip${t.id === tab ? " is-active" : ""}`, "aria-selected": String(t.id === tab),
       onclick: () => { state.plansTab = t.id; renderPlans(); }
-    }, t.label)),
-    h("span", { class: "segmented-thumb" })
+    }, t.label, h("span", { class: "tab-count", text: counts[t.id] })))
   );
-  setThumb(tabs, PLAN_TABS.findIndex((t) => t.id === tab));
   const list = h("ul", { class: "plan-list" });
 
   root.replaceChildren(
     h("header", { class: "page-head" },
       h("h1", { class: "page-title", text: "Mis planes" }),
-      h("p", { class: "page-sub", text: "Tu historial con Tux: en curso, completados, guardados y papelera." })
+      h("p", { class: "page-sub", text: "Tu historial con Tux: en curso, completados, publicados, guardados y papelera." })
     ),
     tabs,
     list
@@ -1064,6 +1100,8 @@ async function fillPlanList(list, tab) {
   if (tab === "saved") {
     const activities = (await Promise.all(state.saved.map(resolveActivity))).filter(Boolean);
     rows = activities.map(savedRow);
+  } else if (tab === "published") {
+    rows = state.myPlans.map(publishedRow);
   } else {
     rows = historyOf(tab).map((entry) => historyRow(entry, tab));
   }
@@ -1100,6 +1138,11 @@ function historyRow(entry, tab) {
       h("button", { class: "ghost-btn small accent", type: "button", onclick: () => openComplete(activity) }, "Completar"),
       h("button", { class: "icon-action", type: "button", "aria-label": "Descartar", onclick: () => openDiscard(activity) }, svgUse("i-trash"))
     ];
+  } else if (tab === "completed" && entry.proofUrl) {
+    actions = [
+      h("button", { class: "ghost-btn small", type: "button", onclick: () => openComplete(activity, { replace: entry }) }, "Reemplazar"),
+      h("button", { class: "icon-action", type: "button", "aria-label": "Quitar prueba", onclick: () => removeProof(entry) }, svgUse("i-trash"))
+    ];
   } else if (tab === "discarded") {
     actions = [h("button", { class: "ghost-btn small", type: "button", onclick: () => restorePlan(entry) }, "Restaurar")];
   }
@@ -1130,6 +1173,40 @@ function savedRow(a) {
       h("button", { class: "icon-action", type: "button", "aria-label": "Quitar de guardados", onclick: () => toggleSaved(a.id) },
         svgUse("i-bookmark")))
   );
+}
+
+function publishedRow(a) {
+  return h("li", { class: "plan-row" },
+    h("button", { class: "plan-row-main", type: "button", onclick: () => openPlan(a.id) },
+      planThumb(a),
+      h("span", { class: "plan-text" },
+        h("b", { text: a.title }),
+        h("small", { text: `${formatCount(a.likeCount || 0)} apuntados · ${formatCount(a.commentCount || 0)} comentarios${a.seed ? " · prueba" : ""}` })
+      )
+    ),
+    h("span", { class: "plan-row-actions" },
+      h("button", { class: "icon-action", type: "button", "aria-label": "Eliminar publicación", onclick: () => removePlan(a) }, svgUse("i-trash")))
+  );
+}
+
+// Quita la prueba multimedia: borra el archivo del HDD, el registro y devuelve el plan a "en curso".
+async function removeProof(entry) {
+  const ok = await confirmDialog({
+    title: "Quitar prueba multimedia",
+    message: "Se borrará el archivo del almacenamiento y el plan volverá a «En curso» para que subas otra prueba.",
+    confirmLabel: "Quitar prueba"
+  });
+  if (!ok) return;
+  try {
+    await deleteMediaRef(entry.proofUrl, state.user);
+    if (entry.proofThumb && entry.proofThumb !== entry.proofUrl) await deleteMediaRef(entry.proofThumb, state.user).catch(() => {});
+    if (entry.proofId) await deleteProofDoc(entry.proofId).catch(() => {});
+    await removeProofFromHistory(state.user.uid, entry.activityId);
+    toast("Prueba eliminada · el plan vuelve a En curso");
+  } catch (err) {
+    console.error(err);
+    toast(err.message || "No se pudo quitar la prueba.");
+  }
 }
 
 async function restorePlan(entry) {
@@ -1218,7 +1295,7 @@ function updatePrefs(change) {
 function renderSettings() {
   const prefs = currentPrefs();
   const sig = JSON.stringify([state.user?.uid, state.user?.email, state.profile?.nickname, state.profile?.photoURL,
-    state.profile?.avatarColor, prefs, historyOf("discarded").length, themePreference()]);
+    state.profile?.avatarColor, prefs, historyOf("discarded").length, themePreference(), state.isAdmin, currentStar()?.activity.id]);
   if (!memo("settings", sig)) return;
 
   const freqIndex = FREQUENCIES.findIndex((f) => f.days === prefs.frequencyDays);
@@ -1265,7 +1342,8 @@ function renderSettings() {
         h("button", { class: "settings-row", type: "button", onclick: openEditProfile },
           svgUse("i-edit"), "Editar perfil", svgUse("i-chevron", "icon chev")),
         h("button", { class: "settings-row danger", type: "button", onclick: signOutUser },
-          svgUse("i-logout"), "Cerrar sesión")
+          svgUse("i-logout"), "Cerrar sesión"),
+        uidRow(state.user.uid)
       )
     : h("section", { class: "settings-card" },
         h("h3", { text: "Cuenta" }),
@@ -1298,9 +1376,86 @@ function renderSettings() {
         h("span", { class: "count", text: String(historyOf("discarded").length) }), svgUse("i-chevron", "icon chev"))
     ),
     h("section", { class: "settings-card" }, h("h3", { text: "Apariencia" }), themeGroup),
+    isDevMode() && devToolsCard(),
     h("p", { class: "app-version", text: `Tux · Versión ${APP_VERSION}` })
   );
   syncThemeUI();
+}
+
+/* ---------- Herramientas de desarrollo (admin o modo dev) ---------- */
+// Modo dev: admins, localhost o ?dev=1 (se recuerda en este navegador).
+function isDevMode() {
+  if (state.isAdmin || ["localhost", "127.0.0.1"].includes(location.hostname)) return true;
+  try {
+    if (new URLSearchParams(location.search).get("dev") === "1") localStorage.setItem("tux-dev", "1");
+    return localStorage.getItem("tux-dev") === "1";
+  } catch {
+    return false;
+  }
+}
+
+async function runDevAction(button, action) {
+  if (!requireAuth()) return;
+  setLoading(button, true);
+  try {
+    await action();
+  } catch (err) {
+    console.error(err);
+    toast(err.message || "La acción ha fallado.");
+  } finally {
+    setLoading(button, false);
+  }
+}
+
+// Sustituye la actividad estrella actual por otra sin esperar al siguiente periodo.
+function rerollStar() {
+  const current = currentStar();
+  const prefs = currentPrefs();
+  const period = currentPeriod(prefs.frequencyDays);
+  const history = new Map(state.history);
+  if (current) history.set(current.activity.id, { status: "discarded" });
+  const pick = pickStar(feedSource(), { prefs, history, seed: `${state.user?.uid}:${period}:${Date.now()}` });
+  if (!pick) return toast("No quedan planes disponibles: genera más planes de prueba.");
+  const next = { activityId: pick.activity.id, period, frequencyDays: prefs.frequencyDays };
+  state.profile = { ...(state.profile || {}), star: next };
+  saveStar(state.user.uid, next).catch((err) => console.warn("Tux: no se pudo guardar la estrella.", err));
+  onDataChange();
+  toast(`Nueva actividad estrella: ${pick.activity.title}`);
+}
+
+function devToolsCard() {
+  const button = (icon, label, onclick, cls = "") =>
+    h("button", { class: `settings-row ${cls}`, type: "button", onclick: (e) => onclick(e.currentTarget) }, svgUse(icon), label);
+  return h("section", { class: "settings-card dev-card" },
+    h("h3", { text: state.isAdmin ? "Herramientas de desarrollo · Admin" : "Herramientas de desarrollo" }),
+    button("i-sparkle", "Generar más planes de prueba", (btn) => runDevAction(btn, async () => {
+      const created = await seedActivities(state.user, state.profile, 6);
+      toast(created ? `${created} planes de prueba creados` : "Ya tienes todos los planes de prueba");
+      loadMyPlans();
+    })),
+    button("i-refresh", "Nueva actividad estrella ahora", () => state.user ? rerollStar() : requireAuth()),
+    button("i-trash", "Borrar mis planes de prueba", (btn) => runDevAction(btn, async () => {
+      const ok = await confirmDialog({
+        title: "Borrar planes de prueba",
+        message: "Se eliminarán todos los planes generados como prueba que hayas publicado.",
+        confirmLabel: "Borrar"
+      });
+      if (!ok) return;
+      toast(`${await deleteSeedActivities(state.user.uid)} planes de prueba eliminados`);
+      loadMyPlans();
+    }), "danger"),
+    state.isAdmin && h("a", { class: "settings-row", href: "./admin/" }, svgUse("i-shield"), "Abrir panel de administración", svgUse("i-chevron", "icon chev"))
+  );
+}
+
+function uidRow(uid) {
+  return h("div", { class: "uid-row" },
+    h("span", {}, h("small", { text: "Tu ID de usuario" }), h("code", { text: uid })),
+    h("button", {
+      class: "icon-action", type: "button", "aria-label": "Copiar ID",
+      onclick: () => navigator.clipboard.writeText(uid).then(() => toast("ID copiado"), () => toast("No se pudo copiar"))
+    }, svgUse("i-copy"))
+  );
 }
 
 async function signOutUser() {
@@ -1632,9 +1787,10 @@ const dropzone = $("#dropzone");
 const completeSubmit = $("#complete-submit");
 const completeError = $("#complete-error");
 const proof360 = $("#proof-360");
-let completeCtx = null; // { activity, file, kind, probe }
+let completeCtx = null; // { activity, file, kind, probe, replace? }
 
 proofInput.accept = ACCEPT_ATTR;
+$("#dropzone-limits").textContent = LIMITS_LABEL;
 
 function resetProof() {
   if (completeCtx?.probe?.objectUrl) URL.revokeObjectURL(completeCtx.probe.objectUrl);
@@ -1657,9 +1813,10 @@ async function handleProofFile(file) {
   resetProof();
   try {
     const kind = validateFile(file);
-    const probe = await probeMedia(file, kind);
+    const [probe, hasSphericalMeta] = await Promise.all([probeMedia(file, kind), detectSphericalMetadata(file, kind)]);
     Object.assign(completeCtx, { file, kind, probe });
-    const detected = isEquirectangular(probe.width, probe.height);
+    const byRatio = isEquirectangular(probe.width, probe.height);
+    const detected = hasSphericalMeta || byRatio;
     const preview = kind === "image"
       ? h("img", { src: probe.objectUrl, alt: "Vista previa" })
       : h("video", { src: probe.objectUrl, autoplay: true, loop: true, playsinline: true });
@@ -1673,7 +1830,8 @@ async function handleProofFile(file) {
       `${probe.width}×${probe.height}`,
       formatSize(file.size)
     ];
-    $("#proof-info").replaceChildren(parts.join(" · "), detected ? h("b", { text: " · 360° detectado" }) : "");
+    const source = hasSphericalMeta ? "metadatos 360°" : "proporción 2:1";
+    $("#proof-info").replaceChildren(parts.join(" · "), detected ? h("b", { text: ` · 360° detectado (${source})` }) : "");
     $("#proof-meta").hidden = false;
     completeSubmit.disabled = false;
   } catch (err) {
@@ -1692,12 +1850,14 @@ dropzone.addEventListener("drop", (e) => {
   handleProofFile(e.dataTransfer.files[0]);
 });
 
-function openComplete(a) {
+function openComplete(a, { replace = null } = {}) {
   if (!requireAuth()) return;
-  completeCtx = { activity: a, file: null, kind: null, probe: null };
+  completeCtx = { activity: a, file: null, kind: null, probe: null, replace };
   completeForm.reset();
   resetProof();
   $("#complete-plan").textContent = a.title;
+  $("#complete-title").textContent = replace ? "Reemplazar prueba" : "Completar plan";
+  completeSubmit.textContent = replace ? "Reemplazar prueba" : "Completar plan";
   openModal(completeModal);
   // Avisa pronto si el almacenamiento (servidor local + disco HDD) no está disponible.
   checkMediaServer().then((status) => {
@@ -1735,8 +1895,16 @@ completeForm.addEventListener("submit", async (e) => {
     await setHistory(state.user.uid, ctx.activity, "completed", {
       proofId, proofUrl: upload.url, proofThumb: upload.thumbUrl || "", proofType: ctx.kind, is360
     });
+    // Al reemplazar: se borra la prueba anterior (archivo en el HDD + registro).
+    const old = ctx.replace;
+    if (old?.proofUrl && old.proofUrl !== upload.url) {
+      await deleteMediaRef(old.proofUrl, state.user).catch((err) => console.warn("Tux: archivo anterior no borrado.", err));
+      if (old.proofThumb && old.proofThumb !== old.proofUrl) await deleteMediaRef(old.proofThumb, state.user).catch(() => {});
+      if (old.proofId) await deleteProofDoc(old.proofId).catch(() => {});
+    }
     closeModal(completeModal);
-    toast(is360 ? "¡Plan completado! Tu 360° ya está en la Galería VR 🎉" : "¡Plan completado! 🎉");
+    if (old) toast("Prueba reemplazada");
+    else toast(is360 ? "¡Plan completado! Tu 360° ya está en la Galería VR 🎉" : "¡Plan completado! 🎉");
   } catch (err) {
     console.error(err);
     completeError.textContent = err.message || "No se pudo completar. Inténtalo de nuevo.";
@@ -1747,68 +1915,50 @@ completeForm.addEventListener("submit", async (e) => {
 });
 
 /* ==========================================================
-   Visor multimedia / 360° / VR
+   Notificaciones
    ========================================================== */
-const viewerModal = $("#viewer-modal");
-const viewerStage = $("#viewer-stage");
-const soundBtn = $("#viewer-sound");
-let viewerSession = null;
-let viewerToken = 0;
+const notificationsModal = $("#notifications-modal");
 
-function setSoundIcon(muted) {
-  soundBtn.replaceChildren(svgUse(muted ? "i-mute" : "i-volume"));
-  soundBtn.setAttribute("aria-label", muted ? "Activar sonido" : "Silenciar");
+function renderBell() {
+  const bell = $("#header-bell");
+  bell.hidden = !state.user;
+  const unread = state.notifications.filter((n) => !n.read).length;
+  const badge = $("#bell-badge");
+  badge.hidden = unread === 0;
+  badge.textContent = unread > 9 ? "9+" : unread;
+  bell.setAttribute("aria-label", unread ? `Notificaciones (${unread} sin leer)` : "Notificaciones");
 }
 
-async function openViewer({ url, type = "image", is360 = false, title = "", sub = "" }) {
-  const token = ++viewerToken;
-  viewerSession?.destroy();
-  viewerSession = null;
-  viewerStage.replaceChildren();
-  $("#viewer-title").textContent = title;
-  $("#viewer-sub").textContent = sub;
-  $("#viewer-badge").hidden = !is360;
-  soundBtn.hidden = type !== "video";
-  setSoundIcon(true);
-  openModal(viewerModal);
-
-  let media;
-  if (is360) {
-    $("#viewer-loading").hidden = false;
-    try {
-      const session = await mountVrScene(viewerStage, { url, type });
-      if (token !== viewerToken || !viewerModal.open) return session.destroy();
-      viewerSession = session;
-      media = session.media;
-    } catch (err) {
-      console.error(err);
-      toast(err.message || "No se pudo abrir el visor 360°.");
-      closeModal(viewerModal);
-      return;
-    } finally {
-      $("#viewer-loading").hidden = true;
-    }
-  } else {
-    media = type === "video"
-      ? h("video", { src: url, autoplay: true, loop: true, playsinline: true, controls: true })
-      : h("img", { src: url, alt: title });
-    if (type === "video") media.muted = true;
-    viewerStage.append(media);
+function renderNotifications() {
+  const list = $("#notification-list");
+  if (!state.notifications.length) {
+    list.replaceChildren(h("li", { class: "list-empty" }, tuxLogo("empty-mark"), h("p", { text: "No tienes notificaciones." })));
+    return;
   }
-  soundBtn.onclick = () => {
-    if (!media || media.tagName !== "VIDEO") return;
-    media.muted = !media.muted;
-    if (!media.muted) media.play?.().catch(() => {});
-    setSoundIcon(media.muted);
-  };
+  list.replaceChildren(...state.notifications.map((n) => {
+    const kind = NOTIFICATION_KINDS[n.kind] || NOTIFICATION_KINDS.info;
+    return h("li", { class: `notification${n.read ? "" : " is-unread"}` },
+      h("span", { class: "notification-icon", text: kind.emoji }),
+      h("div", { class: "notification-body" },
+        h("div", { class: "notification-head" }, h("b", { text: n.title }), h("time", { text: timeAgo(n.createdAt) })),
+        h("p", { text: n.body }),
+        h("small", { text: `${kind.label} · ${n.fromName || "Equipo Tux"}` })
+      ),
+      h("button", {
+        class: "icon-action", type: "button", "aria-label": "Borrar notificación",
+        onclick: () => deleteNotification(n.id).catch(() => toast("No se pudo borrar."))
+      }, svgUse("i-x"))
+    );
+  }));
 }
 
-viewerModal.addEventListener("close", () => {
-  viewerToken++;
-  viewerSession?.destroy();
-  viewerSession = null;
-  viewerStage.replaceChildren();
+$("#header-bell").addEventListener("click", () => {
+  renderNotifications();
+  openModal(notificationsModal);
+  markAllRead(state.notifications).catch((err) => console.warn("Tux: no se pudieron marcar como leídas.", err));
 });
+
+initViewer();
 
 /* ==========================================================
    Arranque

@@ -10,6 +10,7 @@ import {
   setDoc,
   updateDoc,
   deleteDoc,
+  deleteField,
   onSnapshot,
   serverTimestamp
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
@@ -67,6 +68,18 @@ export function setHistory(uid, activity, status, extra = {}) {
     updatedAt: serverTimestamp()
   });
 }
+
+// Quita la prueba de un plan completado: vuelve a "en curso" (pendiente de completar).
+export const removeProofFromHistory = (uid, activityId) =>
+  updateDoc(historyRef(uid, activityId), {
+    status: "accepted",
+    proofId: deleteField(),
+    proofUrl: deleteField(),
+    proofThumb: deleteField(),
+    proofType: deleteField(),
+    is360: deleteField(),
+    updatedAt: serverTimestamp()
+  });
 
 // Restaurar desde la papelera = olvidar el descarte; vuelve a ser sugerible.
 export const restoreFromTrash = (uid, activityId) => deleteDoc(historyRef(uid, activityId));

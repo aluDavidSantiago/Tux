@@ -1,12 +1,16 @@
 rules_version = '2';
 
 // Reglas de seguridad de Tux.
-// Colecciones: users (+ history), activities (+ comments), likes, saved, proofs.
+// Colecciones: users (+ history), activities (+ comments), likes, saved, proofs, notifications, admins.
 service cloud.firestore {
   match /databases/{database}/documents {
 
     function signedIn() { return request.auth != null; }
     function isUser(uid) { return signedIn() && request.auth.uid == uid; }
+    // Admin = existe admins/{uid}. Esa colección solo se escribe desde la consola de Firebase.
+    function isAdmin() {
+      return signedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
     function activityPath(id) { return /databases/$(database)/documents/activities/$(id); }
     function onlyChanged(keys) {
       return request.resource.data.diff(resource.data).affectedKeys().hasOnly(keys);
@@ -74,8 +78,11 @@ service cloud.firestore {
       allow delete: if false;
 
       match /history/{activityId} {
-        allow read, delete: if isUser(uid);
-        allow create, update: if isUser(uid) && validHistory(request.resource.data, activityId);
+        allow read, delete: if isUser(uid) || isAdmin();
+        allow create: if isUser(uid) && validHistory(request.resource.data, activityId);
+        // El admin solo puede devolver un plan a "en curso" (al quitar una prueba no válida).
+        allow update: if (isUser(uid) && validHistory(request.resource.data, activityId))
+          || (isAdmin() && request.resource.data.status == 'accepted' && validHistory(request.resource.data, activityId));
       }
     }
 
@@ -83,7 +90,7 @@ service cloud.firestore {
     function validActivity(d) {
       return d.keys().hasOnly(['title', 'description', 'emoji', 'imageUrl', 'category', 'budget',
                                'effort', 'when', 'duration', 'authorId', 'authorName',
-                               'likeCount', 'commentCount', 'createdAt'])
+                               'likeCount', 'commentCount', 'createdAt', 'seed'])
         && d.title is string && d.title.size() >= 3 && d.title.size() <= 80
         && d.description is string && d.description.size() <= 280
         && d.emoji is string && d.emoji.size() <= 16
@@ -94,7 +101,8 @@ service cloud.firestore {
         && d.effort in ['low', 'mid', 'high']
         && d.when in ['day', 'night', 'weekend']
         && d.duration in ['15 min', '30 min', '1 h', '2 h', 'Medio día']
-        && d.authorName is string && d.authorName.size() <= 24;
+        && d.authorName is string && d.authorName.size() <= 24
+        && (!('seed' in d) || d.seed is bool);
     }
 
     // +1/-1 en likeCount solo si el doc likes/{uid}_{id} se crea/borra en el mismo batch.
@@ -120,7 +128,7 @@ service cloud.firestore {
         && request.resource.data.commentCount == 0
         && request.resource.data.createdAt == request.time;
       allow update: if signedIn() && (validLikeChange(id) || validCommentCountChange());
-      allow delete: if isUser(resource.data.authorId);
+      allow delete: if isUser(resource.data.authorId) || isAdmin();
 
       match /comments/{commentId} {
         allow read: if true;
@@ -186,7 +194,32 @@ service cloud.firestore {
         && request.resource.data.activityId is string
         && request.resource.data.activityTitle is string && request.resource.data.activityTitle.size() <= 80
         && request.resource.data.createdAt == request.time;
-      allow delete: if signedIn() && resource.data.uid == request.auth.uid;
+      allow delete: if (signedIn() && resource.data.uid == request.auth.uid) || isAdmin();
+    }
+
+    // ---------- Notificaciones (las envían los admins) ----------
+    match /notifications/{notificationId} {
+      allow read: if signedIn() && (resource.data.toUid == request.auth.uid || isAdmin());
+      allow create: if isAdmin()
+        && request.resource.data.keys().hasOnly(['toUid', 'title', 'body', 'kind', 'read', 'fromName', 'createdAt'])
+        && request.resource.data.toUid is string && request.resource.data.toUid.size() <= 128
+        && request.resource.data.title is string
+        && request.resource.data.title.size() >= 1 && request.resource.data.title.size() <= 80
+        && request.resource.data.body is string
+        && request.resource.data.body.size() >= 1 && request.resource.data.body.size() <= 1000
+        && request.resource.data.kind in ['info', '360', 'warning']
+        && request.resource.data.read == false
+        && request.resource.data.fromName is string && request.resource.data.fromName.size() <= 40
+        && request.resource.data.createdAt == request.time;
+      allow update: if signedIn() && resource.data.toUid == request.auth.uid
+        && onlyChanged(['read']) && request.resource.data.read is bool;
+      allow delete: if signedIn() && (resource.data.toUid == request.auth.uid || isAdmin());
+    }
+
+    // ---------- Admins (solo lectura del propio documento) ----------
+    match /admins/{uid} {
+      allow read: if isUser(uid);
+      allow write: if false;
     }
   }
 }

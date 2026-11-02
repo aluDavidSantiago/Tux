@@ -6,7 +6,9 @@
 //                width, height, caption, createdAt }
 import {
   collection,
+  doc,
   addDoc,
+  deleteDoc,
   query,
   where,
   limit,
@@ -17,11 +19,16 @@ import { db } from "./firebaseConfig.js";
 import { MEDIA_PROVIDER, LOCAL_MEDIA_SERVER, CLOUDINARY, isMediaConfigured } from "./mediaConfig.js";
 
 const MB = 1024 * 1024;
+// Los JPG/MP4 360° exportados de Insta360 pesan mucho: el HDD local admite más que Cloudinary gratis.
+export const MEDIA_LIMITS = MEDIA_PROVIDER === "local"
+  ? { image: 50 * MB, video: 500 * MB }
+  : { image: 10 * MB, video: 100 * MB };
 export const ACCEPTED_TYPES = {
-  "image/jpeg": { kind: "image", max: 10 * MB },
-  "image/png": { kind: "image", max: 10 * MB },
-  "video/mp4": { kind: "video", max: 100 * MB }
+  "image/jpeg": { kind: "image", max: MEDIA_LIMITS.image },
+  "image/png": { kind: "image", max: MEDIA_LIMITS.image },
+  "video/mp4": { kind: "video", max: MEDIA_LIMITS.video }
 };
+export const LIMITS_LABEL = `JPG o PNG hasta ${MEDIA_LIMITS.image / MB} MB · MP4 hasta ${MEDIA_LIMITS.video / MB} MB`;
 export const ACCEPT_ATTR = Object.keys(ACCEPTED_TYPES).join(",");
 
 export function validateFile(file) {
@@ -80,6 +87,28 @@ export function probeMedia(file, kind) {
 // Las fotos/vídeos 360° equirectangulares tienen proporción 2:1.
 export const isEquirectangular = (width, height) =>
   width >= 1024 && height > 0 && Math.abs(width / height - 2) <= 0.04;
+
+// Metadatos 360°: XMP GPano en JPG/PNG (Insta360, Ricoh, Google) y Spherical Video (V1 XML o
+// cajas sv3d/proj de V2) en MP4. En vídeo se lee el principio y el final (el moov puede ir al final).
+const SPHERICAL_MARKERS = [
+  /GPano:ProjectionType\s*(=\s*["']|>)\s*equirectangular/i,
+  /GPano:UsePanoramaViewer\s*(=\s*["']|>)\s*true/i,
+  /GSpherical:Spherical\s*>\s*true/i,
+  /GSpherical:ProjectionType\s*>\s*equirectangular/i
+];
+
+export async function detectSphericalMetadata(file, kind) {
+  const SPAN = 1024 * 1024;
+  const ranges = [[0, Math.min(file.size, SPAN)]];
+  if (kind === "video" && file.size > SPAN) ranges.push([Math.max(SPAN, file.size - 4 * SPAN), file.size]);
+  const decoder = new TextDecoder("latin1");
+  for (const [start, end] of ranges) {
+    const text = decoder.decode(await file.slice(start, end).arrayBuffer());
+    if (SPHERICAL_MARKERS.some((re) => re.test(text))) return true;
+    if (kind === "video" && text.includes("sv3d") && /proj|equi/.test(text)) return true;
+  }
+  return false;
+}
 
 /* ---------- Resolución de referencias ---------- */
 export const isLocalRef = (ref) => typeof ref === "string" && ref.startsWith("local:");
@@ -177,6 +206,29 @@ export async function uploadMedia({ file, kind, user, thumbBlob, onProgress }) {
   });
   return { url: data.secure_url, thumbUrl: cloudinaryThumb(data.secure_url, kind) };
 }
+
+// Borra físicamente un archivo del HDD a través del servidor (el propio dueño o un admin).
+// Las referencias de Cloudinary no se pueden borrar sin firma: se ignoran.
+export async function deleteMediaRef(ref, user) {
+  if (!isLocalRef(ref)) return false;
+  const token = await user.getIdToken();
+  let res;
+  try {
+    res = await fetch(`${LOCAL_MEDIA_SERVER}/api/media/${ref.slice("local:".length)}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${token}` }
+    });
+  } catch {
+    throw new Error("El servidor de almacenamiento no responde: no se ha borrado nada.");
+  }
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `No se pudo borrar el archivo (${res.status}).`);
+  }
+  return true;
+}
+
+export const deleteProofDoc = (proofId) => deleteDoc(doc(db, "proofs", proofId));
 
 export async function createProof({ user, authorName, activity, upload, kind, is360, caption, width, height }) {
   const ref = await addDoc(collection(db, "proofs"), {

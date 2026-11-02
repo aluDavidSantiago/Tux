@@ -2,7 +2,7 @@
 
 **Tux** es una red social minimalista para descubrir y compartir actividades casuales, económicas y de bajo esfuerzo. Cada día (o cada semana) Tux elige **una actividad estrella** para ti, la cierras con una prueba en foto, vídeo o **360°/VR**, y la comunidad la ve en una galería inmersiva.
 
-🔗 **Demo:** https://aludavidsantiago.github.io/Tux/ · **Versión:** 1.0.0-beta
+🔗 **Demo:** https://aludavidsantiago.github.io/Tux/ · **Admin:** https://aludavidsantiago.github.io/Tux/admin/ · **Versión:** 1.1.0-beta
 
 ## 🚀 Características
 - **Panel · TuxPlans Central:** una única actividad estrella por periodo, elegida según tus intereses, presupuesto y energía máximos, con los motivos de la elección a la vista y una cuenta atrás hasta la siguiente.
@@ -10,7 +10,11 @@
 - **Descarte con justificación:** descartar exige elegir un motivo («No tengo el material requerido», «Ubicación inalcanzable», «No es mi vibe»…). Sin motivo, el botón no se activa.
 - **Mis planes:** en curso, completados, guardados y **papelera**. Lo descartado no se vuelve a sugerir salvo que lo restaures.
 - **Prueba multimedia obligatoria:** completar un plan exige adjuntar JPG/PNG (≤10 MB) o MP4 (≤100 MB), que se guardan en el disco externo `/Volumes/HDD/Tux_Storage` a través del servidor local de Tux.
-- **360°/VR:** detección automática de contenido equirectangular (2:1) y visor inmersivo con A-Frame (WebXR) en la Galería VR, en las pruebas y en las imágenes 360° de los planes.
+- **360°/VR (Insta360):** detección por proporción 2:1 **y** por metadatos (XMP `GPano` en JPG/PNG, Spherical Video V1/V2 `sv3d`/`proj` en MP4). Todo contenido 360° —aunque se subiera sin marcar— se abre siempre en el visor inmersivo A-Frame (WebXR). Límites locales ampliados para exportaciones 360°: 50 MB por foto y 500 MB por vídeo.
+- **Gestión de tus publicaciones:** eliminar tus planes publicados (con confirmación), reemplazar o quitar la prueba multimedia de un plan completado (vuelve a «En curso»). Cada borrado elimina también el archivo físico del HDD.
+- **Notificaciones:** campana en la cabecera con los avisos que envía el equipo de Tux.
+- **Herramientas de desarrollo** (admins, `localhost` o `?dev=1`): generar planes de prueba, nueva actividad estrella al instante y borrar los planes de prueba.
+- **Panel de administración** (`/admin`): pruebas multimedia con previsualización 360°, avisos de incoherencias (2:1 sin marcar, 360° que no es 2:1), «Quitar solo prueba» y «Eliminar publicación» con borrado en el HDD, planes, usuarios y envío de notificaciones con plantillas.
 - **Explorar:** feed vertical a pantalla completa con filtros, búsqueda, «Me apunto», comentarios y guardados.
 - **Acceso libre:** cualquiera navega; al interactuar aparece el acceso (email/contraseña o Google).
 - **Minimal Monolith:** negro OLED `#0D0D0E`, acento `#FF6B35`, microinteracciones y tema oscuro/claro/sistema.
@@ -29,7 +33,9 @@
 │   ├── css/styles.css      # Sistema de diseño
 │   ├── js/app.js           # Orquestador de la interfaz
 │   ├── js/ui.js            # Utilidades DOM, toasts y modales
-│   ├── js/vr.js            # Visor 360°/VR (A-Frame)
+│   ├── js/vr.js            # Escena 360°/VR (A-Frame)
+│   ├── js/viewer.js        # Visor compartido (app + admin) con detección 360° al reproducir
+│   ├── admin/              # Panel de administración (/admin)
 │   └── img/                # Logo, favicon e icono táctil
 ├── src/
 │   ├── firebaseConfig.js   # Firebase App, Auth y Firestore
@@ -39,7 +45,9 @@
 │   ├── social.js           # Me apunto, guardados y comentarios
 │   ├── plans.js            # Preferencias, estrella e historial
 │   ├── recommendations.js  # Motor de la actividad estrella (funciones puras)
-│   └── media.js            # Validación, detección 360°, subida y pruebas
+│   ├── media.js            # Validación, detección 360° (2:1 + metadatos), subida y borrado
+│   ├── notifications.js    # Notificaciones de usuario
+│   └── admin.js            # Operaciones de administración
 ├── server/                 # Servidor multimedia local (Node ≥ 20)
 │   ├── server.js           # API de subida + entrega de archivos (sin listados ni borrado web)
 │   ├── storage.js          # Carpetas aisladas por usuario en el HDD
@@ -58,6 +66,8 @@
 | `users/{uid}/history/{activityId}` | `status` (accepted · completed · discarded), `title`, `category`, `emoji`, `imageUrl`, `reason`, `note`, `proofId`, `proofUrl`, `proofType`, `is360`, `updatedAt` |
 | `activities/{id}` (+ `comments`) | plan publicado con contadores `likeCount` / `commentCount` |
 | `likes` · `saved` | `{uid}_{activityId}` → `uid`, `activityId`, `createdAt` |
+| `notifications/{id}` | `toUid`, `title`, `body`, `kind` (info · 360 · warning), `read`, `fromName`, `createdAt` |
+| `admins/{uid}` | documento de alta de administrador (solo se crea desde la consola) |
 | `proofs/{id}` | `uid`, `authorName`, `activityId`, `activityTitle`, `url`, `thumbUrl`, `type`, `is360`, `width`, `height`, `caption`, `createdAt` |
 
 Las reglas exigen `reason` al descartar y una prueba al completar. Las pruebas locales se guardan como `local:users/{uid}/{archivo}` y las reglas solo aceptan referencias a la carpeta del **propio** usuario.
@@ -69,8 +79,9 @@ npm install
 npm start            # manual: http://localhost:8787 → /Volumes/HDD/Tux_Storage
 ```
 - Estructura: `/Volumes/HDD/Tux_Storage/users/{uid}/{uuid}.jpg|png|mp4` (+ `{uuid}.thumb.jpg` para vídeos).
-- **Aislamiento:** solo el servidor escribe; cada subida exige un ID token de Firebase válido y va a la carpeta de ese uid. Se comprueban tipo, firma binaria, tamaño (10 MB imagen, 100 MB vídeo), cuota (5 GB/usuario) y ritmo (20 subidas/min).
-- **No navegable:** no hay listados de carpetas, ni rutas de borrado o modificación por la web; los archivos se sirven solo por su nombre UUID exacto.
+- **Aislamiento:** solo el servidor escribe; cada subida exige un ID token de Firebase válido y va a la carpeta de ese uid. Se comprueban tipo, firma binaria, tamaño (50 MB imagen, 500 MB vídeo), cuota (20 GB/usuario) y ritmo (20 subidas/min).
+- **No navegable:** no hay listados de carpetas ni rutas de modificación; los archivos se sirven solo por su nombre UUID exacto.
+- **Borrado sincronizado:** `DELETE /api/media/users/{uid}/{archivo}` solo para el dueño del archivo o un admin. Borrar un vídeo arrastra su miniatura.
 - **Seguridad del disco:** si el HDD no está montado, el servidor no arranca ni escribe (evita crear `/Volumes/HDD` en el disco interno).
 - **Arranque automático (macOS):** el servidor está instalado como LaunchAgent (`~/Library/LaunchAgents/com.tux.mediaserver.plist`). Arranca al iniciar sesión, espera a que `/Volumes/HDD` esté montado, se relanza solo si se cae y no se relanza mientras falte el disco. Logs en `~/Library/Logs/Tux/media-server.log`.
   ```bash
@@ -87,6 +98,14 @@ npm start            # manual: http://localhost:8787 → /Volumes/HDD/Tux_Storag
   ```
 - Variables opcionales: `TUX_STORAGE_ROOT`, `TUX_VOLUME_ROOT`, `TUX_PORT`, `TUX_EXTRA_ORIGINS`.
 - El disco está en **exFAT**, que no guarda permisos POSIX: el aislamiento lo garantiza el servidor, no el sistema de archivos.
+
+## 🛡️ Administradores
+El rol de admin lo da la existencia de `admins/{uid}` en Firestore. Las reglas impiden crearlo desde la app:
+1. En Tux → Ajustes → Cuenta, copia **Tu ID de usuario**.
+2. Consola de Firebase → Firestore → colección `admins` → documento con ese ID y un campo `role: "admin"`.
+3. Recarga la app: aparecen el acceso a `/admin` y las herramientas de desarrollo.
+
+Las reglas permiten a un admin borrar planes y pruebas de cualquier usuario, devolver un plan a «En curso» y enviar notificaciones. El servidor del HDD comprueba ese mismo documento (con el token del admin) antes de borrar archivos ajenos.
 
 ## 🔐 Configuración
 1. **Firebase Auth:** activar *Email/Password* y *Google*; añadir `aludavidsantiago.github.io` a los dominios autorizados.

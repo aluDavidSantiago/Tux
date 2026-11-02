@@ -4,7 +4,8 @@ import { millis } from "../../src/activities.js";
 export const $ = (sel, root = document) => root.querySelector(sel);
 export const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const SVG_NS = "http://www.w3.org/2000/svg";
-export const LOGO_SRC = "./img/logo.png";
+// Relativo a este módulo: funciona igual desde /public/ y desde /public/admin/.
+export const LOGO_SRC = new URL("../img/logo.png", import.meta.url).href;
 
 export function h(tag, props = {}, ...children) {
   const el = document.createElement(tag);
@@ -107,5 +108,56 @@ export function initModals() {
       const inside = e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
       if (!inside) closeModal(dialog);
     });
+  });
+}
+
+/* ---------- Confirmación (sustituye a window.confirm) ---------- */
+let confirmEl = null;
+
+function buildConfirm() {
+  confirmEl = h("dialog", { class: "sheet confirm", tabindex: "-1", "aria-labelledby": "confirm-title" },
+    h("div", { class: "sheet-grabber" }),
+    h("div", { class: "confirm-icon" }, svgUse("i-trash")),
+    h("h2", { id: "confirm-title" }),
+    h("p", { class: "confirm-message" }),
+    h("div", { class: "confirm-actions" },
+      h("button", { class: "ghost-btn", type: "button", dataset: { answer: "no" } }, "Cancelar"),
+      h("button", { class: "primary-btn", type: "button", dataset: { answer: "yes" } }, "Confirmar")
+    )
+  );
+  document.body.append(confirmEl);
+  confirmEl.addEventListener("cancel", (e) => {
+    e.preventDefault();
+    closeModal(confirmEl);
+  });
+}
+
+// Devuelve una promesa que se resuelve a true/false según la respuesta.
+export function confirmDialog({ title, message, confirmLabel = "Confirmar", danger = true, icon = "i-trash" }) {
+  if (!confirmEl) buildConfirm();
+  $("#confirm-title", confirmEl).textContent = title;
+  $(".confirm-message", confirmEl).textContent = message;
+  $(".confirm-icon", confirmEl).replaceChildren(svgUse(icon));
+  $(".confirm-icon", confirmEl).classList.toggle("danger", danger);
+  const yes = $('[data-answer="yes"]', confirmEl);
+  yes.textContent = confirmLabel;
+  yes.classList.toggle("danger", danger);
+  return new Promise((resolve) => {
+    let answer = false;
+    const onClick = (e) => {
+      const btn = e.target.closest("[data-answer]");
+      const r = confirmEl.getBoundingClientRect();
+      const outside = e.target === confirmEl
+        && (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom);
+      if (!btn && !outside) return;
+      answer = btn?.dataset.answer === "yes";
+      closeModal(confirmEl);
+    };
+    confirmEl.addEventListener("click", onClick);
+    confirmEl.addEventListener("close", () => {
+      confirmEl.removeEventListener("click", onClick);
+      resolve(answer);
+    }, { once: true });
+    openModal(confirmEl);
   });
 }

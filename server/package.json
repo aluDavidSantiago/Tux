@@ -1,6 +1,6 @@
 {
   "name": "tux-media-server",
-  "version": "1.0.0-beta",
+  "version": "1.1.0-beta",
   "private": true,
   "description": "Servidor local de multimedia de Tux: guarda las pruebas en el disco externo (/Volumes/HDD/Tux_Storage).",
   "type": "module",

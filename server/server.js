@@ -1,17 +1,19 @@
 // Servidor de multimedia de Tux.
-//   POST /api/media                → sube una prueba (requiere ID token de Firebase)
+//   POST   /api/media                     → sube una prueba (requiere ID token de Firebase)
+//   DELETE /api/media/users/{uid}/{file}  → borra un archivo (su dueño o un admin)
 //   GET  /media/users/{uid}/{file} → sirve un archivo concreto (con soporte de rangos para vídeo)
 //   GET  /health                   → estado del servidor y del disco
-// No existen rutas de listado ni de borrado: la purga solo se hace con admin.js.
+// No existen rutas de listado; la purga masiva solo se hace con admin.js.
 import http from "node:http";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { PORT, HOST, ALLOWED_ORIGINS, MEDIA_TYPES, THUMB_MAX, USER_QUOTA, UPLOADS_PER_MINUTE } from "./config.js";
-import { initStorage, assertVolumeMounted, saveUpload, resolveMediaFile, userUsage } from "./storage.js";
-import { verifyFirebaseToken } from "./auth.js";
+import { initStorage, assertVolumeMounted, saveUpload, resolveMediaFile, userUsage, deleteMediaFile } from "./storage.js";
+import { verifyFirebaseToken, isAdminToken } from "./auth.js";
 
 const CONTENT_TYPES = { jpg: "image/jpeg", png: "image/png", mp4: "video/mp4" };
 const MEDIA_PATH_RE = /^\/media\/users\/([A-Za-z0-9]{1,128})\/([0-9a-f-]{36}(?:\.thumb)?\.(jpg|png|mp4))$/;
+const DELETE_PATH_RE = /^\/api\/media\/users\/([A-Za-z0-9]{1,128})\/([0-9a-f-]{36}(?:\.thumb)?\.(?:jpg|png|mp4))$/;
 
 function corsHeaders(req, { publicRead = false } = {}) {
   const origin = req.headers.origin;
@@ -72,6 +74,23 @@ async function handleUpload(req, res, verifyToken) {
   sendJson(res, 201, { id: saved.id, key: saved.key, size: saved.size }, cors);
 }
 
+// Borrado sincronizado con Firestore: solo el dueño del archivo o un admin.
+async function handleDelete(req, res, match, { verifyToken, isAdmin }) {
+  const cors = corsHeaders(req);
+  if (!cors["Access-Control-Allow-Origin"]) return sendJson(res, 403, { error: "Origen no permitido." });
+  const token = (req.headers.authorization || "").replace(/^Bearer\s+/i, "");
+  const requester = await verifyToken(token);
+  const [, ownerUid, fileName] = match;
+  if (requester !== ownerUid && !(await isAdmin(token, requester))) {
+    return sendJson(res, 403, { error: "No puedes borrar archivos de otro usuario." }, cors);
+  }
+  assertVolumeMounted();
+  const removed = await deleteMediaFile(ownerUid, fileName);
+  console.log(`[tux] borrado ${ownerUid}/${fileName} (${removed} archivo/s) por ${requester === ownerUid ? "su dueño" : `admin ${requester}`}`);
+  res.writeHead(204, cors);
+  res.end();
+}
+
 function handleMedia(req, res, match) {
   const [, uid, fileName, ext] = match;
   const file = resolveMediaFile(uid, fileName);
@@ -110,14 +129,14 @@ function handleMedia(req, res, match) {
   fs.createReadStream(file.path).pipe(res);
 }
 
-export function createTuxServer({ verifyToken = verifyFirebaseToken } = {}) {
+export function createTuxServer({ verifyToken = verifyFirebaseToken, isAdmin = isAdminToken } = {}) {
   return http.createServer(async (req, res) => {
     const url = new URL(req.url, "http://localhost");
     try {
       if (req.method === "OPTIONS") {
         res.writeHead(204, {
           ...corsHeaders(req, { publicRead: url.pathname.startsWith("/media/") }),
-          "Access-Control-Allow-Methods": "GET, HEAD, POST, OPTIONS",
+          "Access-Control-Allow-Methods": "GET, HEAD, POST, DELETE, OPTIONS",
           "Access-Control-Allow-Headers": "Authorization, Content-Type, X-Tux-Role, X-Tux-Media-Id, Range",
           "Access-Control-Max-Age": "600"
         });
@@ -129,6 +148,8 @@ export function createTuxServer({ verifyToken = verifyFirebaseToken } = {}) {
         return sendJson(res, disk ? 200 : 503, { ok: disk, storage: disk ? "HDD" : "desconectado" }, corsHeaders(req, { publicRead: true }));
       }
       if (url.pathname === "/api/media" && req.method === "POST") return await handleUpload(req, res, verifyToken);
+      const del = DELETE_PATH_RE.exec(url.pathname);
+      if (del && req.method === "DELETE") return await handleDelete(req, res, del, { verifyToken, isAdmin });
       const match = MEDIA_PATH_RE.exec(url.pathname);
       if (match && (req.method === "GET" || req.method === "HEAD")) return handleMedia(req, res, match);
       // Cualquier otra ruta (incluidos directorios): sin listados ni detalles.
