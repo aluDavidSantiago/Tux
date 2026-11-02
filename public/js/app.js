@@ -29,8 +29,9 @@ import {
   ACCEPT_ATTR, LIMITS_LABEL, validateFile, probeMedia, isEquirectangular, detectSphericalMetadata, uploadMedia,
   checkMediaServer, resolveMediaUrl, mediaThumbUrl, createProof, deleteMediaRef, deleteProofDoc, watchVrProofs, SAMPLE_VR,
   startMediaSession, stopMediaSession, onMediaAccessChange, canViewMedia, watchUserProofs, watchRecentProofs,
-  watchProofsByAuthors, setProofCover, uploadAvatar, isLocalAvatar
+  watchProofsByAuthors, setProofCover, uploadAvatar, isLocalAvatar, waitForMediaAccess, finishStagedUpload
 } from "../../src/media.js";
+import { takeQuickParams, createQuickKey, revokeQuickKey, APP_QUICK_URL } from "../../src/quickshare.js";
 import { mediaServerUrl, mediaServerSource } from "../../src/mediaConfig.js";
 import { NOTIFICATION_KINDS, watchNotifications, markAllRead, deleteNotification } from "../../src/notifications.js";
 import { isAdminUser } from "../../src/admin.js";
@@ -43,7 +44,7 @@ import { mountPanoThumb } from "./pano.js";
 import { cropImage } from "./cropper.js";
 import { mascotSvg, ITEMS, SLOTS, itemById, isUnlocked, unlockHint, unlockedIds, EMPTY_EQUIPPED } from "./mascot.js";
 
-export const APP_VERSION = "1.3.0-beta";
+export const APP_VERSION = "1.4.0-beta";
 
 /* ==========================================================
    Estado
@@ -65,6 +66,7 @@ const state = {
   notifications: [],
   following: new Set(),     // uids a los que sigo
   mascot: undefined,        // userAvatars/{mi uid} (undefined = sin cargar, null = sin personalizar)
+  quickKey: null,           // clave de Quick Share recién generada (solo se muestra una vez)
   chats: [],
   social: { tab: "discover", recent: null, followed: null },
   filters: { budget: new Set(), effort: new Set(), category: new Set(), when: new Set(), search: "" },
@@ -348,6 +350,7 @@ watchSession((user) => {
   renderFeed(true);
   renderBell();
   renderChatBadge();
+  if (quickParams) setTimeout(runQuickShare, 0);
   onDataChange();
 });
 
@@ -1802,7 +1805,7 @@ function updatePrefs(change) {
 
 function renderSettings() {
   const prefs = currentPrefs();
-  const sig = JSON.stringify([mediaServerUrl(), state.mascot?.equipped, unlockedIds(myStats()).length, state.user?.uid, state.user?.email, state.profile?.nickname, state.profile?.photoURL,
+  const sig = JSON.stringify([mediaServerUrl(), state.quickKey, state.mascot?.equipped, unlockedIds(myStats()).length, state.user?.uid, state.user?.email, state.profile?.nickname, state.profile?.photoURL,
     state.profile?.avatarColor, prefs, historyOf("discarded").length, themePreference(), state.isAdmin, currentStar()?.activity.id]);
   if (!memo("settings", sig)) return;
 
@@ -1889,6 +1892,7 @@ function renderSettings() {
     ),
     h("section", { class: "settings-card" }, h("h3", { text: "Apariencia" }), themeGroup),
     storageCard(),
+    quickShareCard(),
     isDevMode() && devToolsCard(),
     h("p", { class: "app-version", text: `Tux · Versión ${APP_VERSION}` })
   );
@@ -2511,14 +2515,17 @@ const dropzone = $("#dropzone");
 const completeSubmit = $("#complete-submit");
 const completeError = $("#complete-error");
 const proof360 = $("#proof-360");
-let completeCtx = null; // { activity, file, kind, probe, replace? }
+// { activity, file, kind, probe, replace?, quick?, staged? (archivo ya en el HDD), cover?, published? }
+let completeCtx = null;
 
 proofInput.accept = ACCEPT_ATTR;
 $("#dropzone-limits").textContent = LIMITS_LABEL;
 
 function resetProof() {
   if (completeCtx?.probe?.objectUrl) URL.revokeObjectURL(completeCtx.probe.objectUrl);
-  if (completeCtx) Object.assign(completeCtx, { file: null, kind: null, probe: null });
+  if (completeCtx?.probe?.thumbUrl) URL.revokeObjectURL(completeCtx.probe.thumbUrl);
+  if (completeCtx) Object.assign(completeCtx, { file: null, kind: null, probe: null, cover: null });
+  $("#cover-row").hidden = true;
   proofInput.value = "";
   dropzone.classList.remove("has-file");
   $("#proof-preview").hidden = true;
@@ -2532,8 +2539,14 @@ function resetProof() {
 
 const formatSize = (bytes) => (bytes >= 1048576 ? `${(bytes / 1048576).toFixed(1)} MB` : `${Math.round(bytes / 1024)} KB`);
 
-async function handleProofFile(file) {
+// staged: referencia del archivo si ya está en el HDD (subido por el Atajo de Quick Share).
+async function handleProofFile(file, { staged = null } = {}) {
   if (!file || !completeCtx) return;
+  // Si se cambia el archivo importado por otro, el importado se borra del disco.
+  if (completeCtx.staged && completeCtx.staged !== staged) {
+    deleteMediaRef(completeCtx.staged, state.user).catch(() => {});
+  }
+  completeCtx.staged = staged;
   resetProof();
   try {
     const kind = validateFile(file);
@@ -2557,11 +2570,47 @@ async function handleProofFile(file) {
     const source = hasSphericalMeta ? "metadatos 360°" : "proporción 2:1";
     $("#proof-info").replaceChildren(parts.join(" · "), detected ? h("b", { text: ` · 360° detectado (${source})` }) : "");
     $("#proof-meta").hidden = false;
+    syncCoverRow();
     completeSubmit.disabled = false;
   } catch (err) {
     completeError.textContent = err.message;
   }
 }
+
+/* ---------- Portada 360° antes de publicar ---------- */
+function syncCoverRow() {
+  const ctx = completeCtx;
+  $("#cover-row").hidden = !(ctx?.file && proof360.checked);
+  const c = ctx?.cover;
+  $("#cover-info").textContent = c
+    ? `Portada: ${Math.round(c.yaw)}° · ${Math.round(c.pitch)}° · zoom ${Math.round(c.fov)}°`
+    : "Portada: vista frontal";
+  // Vista previa panorámica apuntando a la portada elegida (fotos, o fotograma de vídeo).
+  if (!ctx?.file || !proof360.checked) return;
+  const src = ctx.kind === "image" ? ctx.probe.objectUrl : ctx.probe.thumbBlob && (ctx.probe.thumbUrl ||= URL.createObjectURL(ctx.probe.thumbBlob));
+  if (!src) return;
+  const holder = h("span", { class: "pano-holder" });
+  if (!mountPanoThumb(holder, { src, view: c })) return;
+  $("#proof-preview").replaceChildren(holder, h("span", { class: "dropzone-change", text: "Cambiar" }));
+}
+
+function openCoverPicker() {
+  const ctx = completeCtx;
+  if (!ctx?.file) return;
+  openViewer({
+    url: ctx.probe.objectUrl, type: ctx.kind, is360: true, title: ctx.activity.title,
+    sub: "Mira hacia lo que quieras destacar y pulsa «Fijar como portada»",
+    view: ctx.cover,
+    onSetCover: async (view) => {
+      if (completeCtx !== ctx) return;
+      ctx.cover = view;
+      syncCoverRow();
+    }
+  });
+}
+
+$("#cover-pick").addEventListener("click", openCoverPicker);
+proof360.addEventListener("change", syncCoverRow);
 
 proofInput.addEventListener("change", () => handleProofFile(proofInput.files[0]));
 ["dragenter", "dragover"].forEach((type) => dropzone.addEventListener(type, (e) => {
@@ -2574,14 +2623,18 @@ dropzone.addEventListener("drop", (e) => {
   handleProofFile(e.dataTransfer.files[0]);
 });
 
-function openComplete(a, { replace = null } = {}) {
+// quick: «Publicación rápida» (Quick Share): además se elige la actividad en un desplegable.
+function openComplete(a, { replace = null, quick = false } = {}) {
   if (!requireAuth()) return;
-  completeCtx = { activity: a, file: null, kind: null, probe: null, replace };
+  completeCtx = { activity: a, file: null, kind: null, probe: null, replace, quick, staged: null, cover: null, published: false };
   completeForm.reset();
   resetProof();
   $("#complete-plan").textContent = a.title;
-  $("#complete-title").textContent = replace ? "Reemplazar prueba" : "Completar plan";
-  completeSubmit.textContent = replace ? "Reemplazar prueba" : "Completar plan";
+  $("#complete-activity-field").hidden = !quick;
+  $("#complete-lead").hidden = quick;
+  if (quick) fillQuickActivities(a);
+  $("#complete-title").textContent = quick ? "Publicación rápida" : replace ? "Reemplazar prueba" : "Completar plan";
+  completeSubmit.textContent = quick ? "Publicar" : replace ? "Reemplazar prueba" : "Completar plan";
   openModal(completeModal);
   // Avisa pronto si el almacenamiento (servidor local + disco HDD) no está disponible.
   checkMediaServer().then((status) => {
@@ -2589,7 +2642,19 @@ function openComplete(a, { replace = null } = {}) {
   });
 }
 
-completeModal.addEventListener("close", () => {
+completeModal.addEventListener("close", async () => {
+  const ctx = completeCtx;
+  // Archivo importado por el Atajo y sin publicar: se pregunta antes de borrarlo del disco.
+  if (ctx?.staged && !ctx.published && state.user) {
+    const discard = await confirmDialog({
+      title: "¿Descartar la importación?",
+      message: "El archivo que subió tu atajo se borrará del disco de Tux.",
+      confirmLabel: "Descartar"
+    });
+    if (!discard) return openModal(completeModal);
+    deleteMediaRef(ctx.staged, state.user).catch(() => {});
+  }
+  if (completeCtx !== ctx) return;
   resetProof();
   completeCtx = null;
 });
@@ -2606,16 +2671,21 @@ completeForm.addEventListener("submit", async (e) => {
   try {
     const server = await checkMediaServer();
     if (!server.ok) throw new Error(server.message || "El almacenamiento no está disponible.");
-    const upload = await uploadMedia({
-      file: ctx.file, kind: ctx.kind, user: state.user, thumbBlob: ctx.probe.thumbBlob,
-      onProgress: (p) => bar.style.setProperty("--p", `${Math.round(p * 100)}%`)
-    });
+    // Quick Share: el archivo ya está en el HDD; solo se sube su miniatura.
+    const upload = ctx.staged
+      ? await finishStagedUpload({ ref: ctx.staged, kind: ctx.kind, user: state.user, thumbBlob: ctx.probe.thumbBlob })
+      : await uploadMedia({
+          file: ctx.file, kind: ctx.kind, user: state.user, thumbBlob: ctx.probe.thumbBlob,
+          onProgress: (p) => bar.style.setProperty("--p", `${Math.round(p * 100)}%`)
+        });
     const is360 = proof360.checked;
     const proofId = await createProof({
       user: state.user, authorName: state.profile?.nickname, activity: ctx.activity, upload,
       kind: ctx.kind, is360, caption: completeForm.caption.value,
       width: ctx.probe.width, height: ctx.probe.height
     });
+    ctx.published = true;
+    if (is360 && ctx.cover) await setProofCover(proofId, ctx.cover).catch((err) => console.warn("Tux: portada no guardada.", err));
     await setHistory(state.user.uid, ctx.activity, "completed", {
       proofId, proofUrl: upload.url, proofThumb: upload.thumbUrl || "", proofType: ctx.kind, is360
     });
@@ -2637,6 +2707,143 @@ completeForm.addEventListener("submit", async (e) => {
     completeSubmit.disabled = !completeCtx?.file;
   }
 });
+
+/* ==========================================================
+   Quick Share (Atajo de iOS + NFC): enlace que abre «Publicación rápida»
+   ========================================================== */
+let quickParams = takeQuickParams();
+const MIME_BY_EXT = { jpg: "image/jpeg", png: "image/png", mp4: "video/mp4" };
+
+function runQuickShare() {
+  const q = quickParams;
+  quickParams = null;
+  if (!q) return;
+  if (!state.user) return requireAuth(() => openQuickPublish(q));
+  openQuickPublish(q);
+}
+
+const until = (test, timeout) => new Promise((resolve) => {
+  const start = Date.now();
+  const tick = () => (test() || Date.now() - start > timeout ? resolve() : setTimeout(tick, 150));
+  tick();
+});
+
+// Actividades a las que se puede asociar: la estrella, las que están en curso y el resto del feed.
+function quickActivityOptions() {
+  const out = [];
+  const seen = new Set();
+  const add = (a, group) => {
+    const status = a && state.history.get(a.id)?.status;
+    if (!a || seen.has(a.id) || status === "completed" || status === "discarded") return;
+    seen.add(a.id);
+    out.push({ activity: a, group });
+  };
+  const star = currentStar();
+  if (star) add(star.activity, "Actividad estrella");
+  historyOf("accepted").forEach((e) => add(findActivity(e.activityId) || { id: e.activityId, ...e }, "En curso"));
+  feedSource().forEach((a) => add(a, "Otros planes"));
+  return out.slice(0, 80);
+}
+
+function fillQuickActivities(selected) {
+  const select = $("#complete-activity");
+  const options = quickActivityOptions();
+  const groups = [...new Set(options.map((o) => o.group))];
+  select.replaceChildren(...groups.map((group) => h("optgroup", { label: group },
+    options.filter((o) => o.group === group).map((o) => h("option", { value: o.activity.id, text: o.activity.title })))));
+  select.value = selected.id;
+  select.onchange = () => {
+    const chosen = options.find((o) => o.activity.id === select.value);
+    if (chosen && completeCtx) {
+      completeCtx.activity = chosen.activity;
+      $("#complete-plan").textContent = chosen.activity.title;
+    }
+  };
+}
+
+async function openQuickPublish(q = {}) {
+  if (!requireAuth(() => openQuickPublish(q))) return;
+  await until(() => state.feedReady && state.historyLoaded, 6000);
+  const [first] = quickActivityOptions();
+  if (!first) return toast("No hay planes disponibles a los que asociar la publicación.");
+  openComplete(first.activity, { quick: true });
+  if (!q.staged && !q.mediaUrl) return; // ?quick=true: el usuario elige el archivo con un toque
+  const label = $("#dropzone-empty b");
+  const original = label.textContent;
+  label.textContent = "Cargando el archivo importado…";
+  dropzone.classList.add("is-loading");
+  try {
+    if (q.staged) {
+      if (!(await waitForMediaAccess())) throw new Error("No se pudo conectar con el disco de Tux. Inténtalo de nuevo.");
+      const ref = `local:users/${state.user.uid}/${q.staged}`;
+      const res = await fetch(resolveMediaUrl(ref)).catch(() => null);
+      if (!res?.ok) {
+        throw new Error(res?.status === 404 ? "El archivo importado ya no está en el disco de Tux." : "No se pudo descargar el archivo importado.");
+      }
+      const file = new File([await res.blob()], q.staged, { type: MIME_BY_EXT[q.staged.split(".").pop()] });
+      await handleProofFile(file, { staged: ref });
+    } else {
+      const res = await fetch(q.mediaUrl).catch(() => null);
+      if (!res?.ok) throw new Error("No se pudo descargar el archivo del enlace (el servidor de origen debe permitir CORS).");
+      const blob = await res.blob();
+      await handleProofFile(new File([blob], q.mediaUrl.split("/").pop().split("?")[0] || "importado", { type: blob.type }));
+    }
+    if (q.auto360 && proof360.checked) openCoverPicker();
+  } catch (err) {
+    console.error(err);
+    completeError.textContent = err.message;
+  } finally {
+    label.textContent = original;
+    dropzone.classList.remove("is-loading");
+  }
+}
+
+// Ajustes → Quick Share: clave personal para el Atajo (se muestra una sola vez).
+function quickShareCard() {
+  if (!state.user) return null;
+  const keyBox = state.quickKey && h("div", { class: "quick-key" },
+    h("small", { text: "Tu clave (cópiala ahora en el atajo; no se volverá a mostrar)" }),
+    h("code", { text: state.quickKey }),
+    h("button", {
+      class: "ghost-btn small", type: "button",
+      onclick: () => navigator.clipboard.writeText(state.quickKey).then(() => toast("Clave copiada"), () => toast("No se pudo copiar"))
+    }, svgUse("i-copy"), "Copiar clave"));
+  const run = (btn, action) => runDevAction(btn, action);
+  return h("section", { class: "settings-card" },
+    h("h3", { text: "Quick Share · NFC" }),
+    h("p", { class: "help", style: "margin:0 0 12px", text: "Acerca el iPhone a una etiqueta NFC (en el palo de selfi o la funda de la Insta360) y tu última foto 360° se sube y se abre aquí lista para publicar." }),
+    keyBox,
+    h("button", {
+      class: "settings-row", type: "button",
+      onclick: (e) => run(e.currentTarget, async () => {
+        const ok = await confirmDialog({
+          title: "Generar clave del atajo",
+          message: "Si ya tenías una, dejará de funcionar y tendrás que pegar la nueva en el atajo.",
+          confirmLabel: "Generar", danger: false, icon: "i-sparkle"
+        });
+        if (!ok) return;
+        state.quickKey = (await createQuickKey(state.user)).key;
+        delete renderSig.settings;
+        renderSettings();
+      })
+    }, svgUse("i-sparkle"), h("span", { class: "row-text" }, "Generar clave para el atajo", h("small", { text: "Para la cabecera X-Tux-Key" }))),
+    h("button", {
+      class: "settings-row", type: "button",
+      onclick: (e) => run(e.currentTarget, async () => {
+        await revokeQuickKey(state.user);
+        state.quickKey = null;
+        delete renderSig.settings;
+        renderSettings();
+        toast("Clave revocada · el atajo ya no puede subir");
+      })
+    }, svgUse("i-x"), "Revocar clave"),
+    h("button", { class: "settings-row", type: "button", onclick: () => openQuickPublish({}) },
+      svgUse("i-upload"), h("span", { class: "row-text" }, "Probar publicación rápida", h("small", { text: APP_QUICK_URL }))),
+    h("a", {
+      class: "settings-row", href: "https://github.com/aluDavidSantiago/Tux/blob/main/docs/nfc-workflow.md", target: "_blank", rel: "noopener"
+    }, svgUse("i-compass"), h("span", { class: "row-text" }, "Guía del atajo y la etiqueta NFC", h("small", { text: "docs/nfc-workflow.md" })), svgUse("i-chevron", "icon chev"))
+  );
+}
 
 /* ==========================================================
    Mensajes privados

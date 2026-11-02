@@ -21,7 +21,7 @@ function loadSecret() {
   return secret;
 }
 
-const sign = (payload) => crypto.createHmac("sha256", loadSecret()).update(payload).digest("base64url");
+export const sign = (payload) => crypto.createHmac("sha256", loadSecret()).update(payload).digest("base64url");
 
 export function issueTicket(uid, now = Date.now()) {
   const nowSec = Math.floor(now / 1000);

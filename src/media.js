@@ -170,6 +170,23 @@ async function refreshTicket() {
   notifyAccess();
 }
 
+// Espera a que haya ticket de lectura (p. ej. al abrir un enlace de Quick Share recién iniciada la sesión).
+export function waitForMediaAccess(timeout = 15000) {
+  if (ticket) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      off();
+      resolve(false);
+    }, timeout);
+    const off = onMediaAccessChange(() => {
+      if (!ticket) return;
+      clearTimeout(timer);
+      off();
+      resolve(true);
+    });
+  });
+}
+
 export function startMediaSession(user) {
   if (mediaUser?.uid === user?.uid) return;
   mediaUser = user;
@@ -316,6 +333,24 @@ export async function uploadMedia({ file, kind, user, thumbBlob, onProgress }) {
     thumbUrl = thumb?.key || thumbUrl;
   }
   return { url: main.key, thumbUrl };
+}
+
+// Archivo ya subido (Quick Share): solo falta su miniatura. Devuelve { url, thumbUrl } como uploadMedia.
+export async function finishStagedUpload({ ref, kind, user, thumbBlob }) {
+  let thumbUrl = kind === "image" ? ref : "";
+  if (thumbBlob) {
+    const mediaId = ref.split("/").pop().split(".")[0];
+    const thumb = await xhrUpload({
+      url: `${mediaServerUrl()}/api/media`,
+      body: thumbBlob,
+      headers: {
+        Authorization: `Bearer ${await user.getIdToken()}`, "Content-Type": "image/jpeg",
+        "X-Tux-Role": "thumb", "X-Tux-Media-Id": mediaId
+      }
+    }).catch(() => null);
+    thumbUrl = thumb?.key || thumbUrl;
+  }
+  return { url: ref, thumbUrl };
 }
 
 // Foto de perfil ya recortada (JPG). Devuelve la referencia "local:users/{uid}/avatar.jpg?v=…".

@@ -1,0 +1,14 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <title>Tux · Subida rápida</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <!-- Enlace de Quick Share (Atajo de iOS / NFC): /Tux/upload/?quick=… abre la app con el modal de
+       publicación. Se conservan los parámetros al redirigir a la app en public/. -->
+  <script>location.replace("../public/" + (location.search || "?quick=true") + location.hash);</script>
+</head>
+<body>
+  <p><a href="../public/?quick=true">Abrir Tux 🐧</a></p>
+</body>
+</html>
