@@ -10,8 +10,11 @@ import {
   watchSession, authErrorMessage
 } from "../../src/auth.js";
 import {
-  AVATAR_COLORS, ensureUserProfile, watchUserProfile, updateUserProfile, getPublicProfile, rememberProfile, searchUsers
+  AVATAR_COLORS, ensureUserProfile, watchUserProfile, updateUserProfile, getPublicProfile, rememberProfile, searchUsers,
+  isAccountDisabled
 } from "../../src/users.js";
+import { watchMascot, getMascot, saveMascot } from "../../src/avatars.js";
+import { REPORT_REASONS, reportProof } from "../../src/reports.js";
 import {
   watchLikes, watchSaved, setLike, setSaved, watchComments, addComment, deleteComment,
   setFollow, watchFollowing, listFollows
@@ -26,7 +29,7 @@ import {
   ACCEPT_ATTR, LIMITS_LABEL, validateFile, probeMedia, isEquirectangular, detectSphericalMetadata, uploadMedia,
   checkMediaServer, resolveMediaUrl, mediaThumbUrl, createProof, deleteMediaRef, deleteProofDoc, watchVrProofs, SAMPLE_VR,
   startMediaSession, stopMediaSession, onMediaAccessChange, canViewMedia, watchUserProofs, watchRecentProofs,
-  watchProofsByAuthors
+  watchProofsByAuthors, setProofCover, uploadAvatar, isLocalAvatar
 } from "../../src/media.js";
 import { mediaServerUrl, mediaServerSource } from "../../src/mediaConfig.js";
 import { NOTIFICATION_KINDS, watchNotifications, markAllRead, deleteNotification } from "../../src/notifications.js";
@@ -36,8 +39,11 @@ import {
   openModal, closeModal, initModals, confirmDialog
 } from "./ui.js";
 import { initViewer, openViewer } from "./viewer.js";
+import { mountPanoThumb } from "./pano.js";
+import { cropImage } from "./cropper.js";
+import { mascotSvg, ITEMS, SLOTS, itemById, isUnlocked, unlockHint, unlockedIds, EMPTY_EQUIPPED } from "./mascot.js";
 
-export const APP_VERSION = "1.2.0-beta";
+export const APP_VERSION = "1.3.0-beta";
 
 /* ==========================================================
    Estado
@@ -58,6 +64,7 @@ const state = {
   isAdmin: false,
   notifications: [],
   following: new Set(),     // uids a los que sigo
+  mascot: undefined,        // userAvatars/{mi uid} (undefined = sin cargar, null = sin personalizar)
   chats: [],
   social: { tab: "discover", recent: null, followed: null },
   filters: { budget: new Set(), effort: new Set(), category: new Set(), when: new Set(), search: "" },
@@ -94,6 +101,8 @@ async function resolveActivity(id) {
 // Punto único tras cualquier cambio de datos.
 function onDataChange() {
   ensureStar();
+  syncUnlocks();
+  if ($("#edit-modal").open) renderPhotoPreview();
   refreshCardStates();
   renderHeader();
   renderActiveView();
@@ -262,7 +271,8 @@ watchSession((user) => {
   sessionUnsubs = [];
   Object.assign(state, {
     user, profile: null, profileLoaded: false, history: new Map(), historyLoaded: false, guestStar: null,
-    liked: new Set(), saved: [], myPlans: [], isAdmin: false, notifications: [], following: new Set(), chats: []
+    liked: new Set(), saved: [], myPlans: [], isAdmin: false, notifications: [], following: new Set(), chats: [],
+    mascot: undefined
   });
   state.social.followed = null;
   followedFeedUnsub?.();
@@ -271,8 +281,23 @@ watchSession((user) => {
 
   if (user) {
     startMediaSession(user);
+    // Cuenta desactivada o eliminada por un admin: se cierra la sesión.
+    isAccountDisabled(user.uid).then((off) => {
+      if (!off || state.user?.uid !== user.uid) return;
+      logOut();
+      toast("Tu cuenta de Tux está desactivada. Escribe al equipo si crees que es un error.");
+    });
     ensureUserProfile(user).catch((err) => console.warn("Tux: perfil no creado.", err));
     sessionUnsubs.push(
+      watchMascot(user.uid, (mascot) => {
+        state.mascot = mascot;
+        renderHeader();
+        syncUnlocks();
+        if (profileModal.open) renderProfile();
+        if (mascotModal.open) renderMascotEditor();
+        delete renderSig.settings;
+        renderActiveView();
+      }),
       watchUserProfile(user.uid, (profile) => {
         state.profile = profile;
         state.profileLoaded = true;
@@ -766,6 +791,7 @@ function renderActiveView() {
 // Llega (o cambia) el ticket de lectura del HDD o la URL del servidor: se repintan las miniaturas.
 onMediaAccessChange(() => {
   Object.keys(renderSig).forEach((key) => delete renderSig[key]);
+  renderHeader();
   renderActiveView();
   if (profileModal.open) renderProfile();
   if (chatCtx && chatModal.open) renderMessages();
@@ -780,11 +806,16 @@ function memo(view, sig) {
 /* ==========================================================
    Cabecera y perfil
    ========================================================== */
-function avatarElement(profile, { interactive = false } = {}) {
+// Foto de perfil visible: URL https o la foto recortada del HDD (requiere sesión y ticket).
+const photoSrc = (url) => (!url ? "" : isLocalAvatar(url) ? (canViewMedia(url) ? resolveMediaUrl(url) : "") : url);
+
+// Avatar: la foto de perfil si hay, si no la mascota Tux con sus ítems equipados.
+function avatarElement(profile, { interactive = false, mascot = null } = {}) {
   const color = AVATAR_COLORS.includes(profile?.avatarColor) ? profile.avatarColor : "orange";
-  const content = profile?.photoURL
-    ? h("img", { src: profile.photoURL, alt: "", referrerpolicy: "no-referrer" })
-    : tuxLogo("avatar-tux");
+  const src = photoSrc(profile?.photoURL);
+  const content = src
+    ? h("img", { src, alt: "", referrerpolicy: "no-referrer", onerror: (e) => e.currentTarget.replaceWith(mascotSvg(mascot?.equipped, "avatar-tux")) })
+    : mascotSvg(mascot?.equipped, "avatar-tux");
   return h(interactive ? "button" : "div", {
     class: "avatar", type: interactive ? "button" : null, dataset: { color },
     "aria-label": interactive ? "Toca para cambiar el color de tu avatar" : null,
@@ -794,7 +825,9 @@ function avatarElement(profile, { interactive = false } = {}) {
 
 function renderHeader() {
   const btn = $("#header-avatar");
-  const sig = state.user ? `${state.profile?.photoURL}|${state.profile?.avatarColor}` : "guest";
+  const sig = state.user
+    ? JSON.stringify([photoSrc(state.profile?.photoURL), state.profile?.avatarColor, state.mascot?.equipped])
+    : "guest";
   if (btn.dataset.sig === sig) return;
   btn.dataset.sig = sig;
   if (!state.user) {
@@ -803,7 +836,7 @@ function renderHeader() {
     btn.setAttribute("aria-label", "Iniciar sesión");
     return;
   }
-  const av = avatarElement(state.profile);
+  const av = avatarElement(state.profile, { mascot: state.mascot });
   btn.className = "header-avatar avatar";
   btn.dataset.color = av.dataset.color;
   btn.replaceChildren(...av.childNodes);
@@ -821,7 +854,7 @@ function onAvatarTap(e) {
   avatar.classList.remove("is-waving");
   void avatar.offsetWidth;
   avatar.classList.add("is-waving");
-  if (!state.profile || state.profile.photoURL) return;
+  if (!state.profile || photoSrc(state.profile.photoURL)) return;
   const next = AVATAR_COLORS[(AVATAR_COLORS.indexOf(avatar.dataset.color) + 1) % AVATAR_COLORS.length];
   avatar.dataset.color = next;
   clearTimeout(avatarTimer);
@@ -840,6 +873,7 @@ async function loadMyPlans() {
   }
   if ($("#profile-modal").open) renderProfile();
   if (state.view === "plans") renderPlans();
+  syncUnlocks();
 }
 
 const profileModal = $("#profile-modal");
@@ -862,8 +896,15 @@ function openUserProfile(uid) {
   if (!uid) return;
   if (profileView?.uid !== uid) {
     profileView?.unsubs.forEach((u) => u());
-    profileView = { uid, profile: null, proofs: null, plans: null, tab: "proofs", list: null, unsubs: [] };
+    profileView = { uid, profile: null, proofs: null, plans: null, mascot: null, tab: "proofs", list: null, unsubs: [] };
     const own = uid === state.user?.uid;
+    if (!own) {
+      profileView.unsubs.push(watchMascot(uid, (mascot) => {
+        if (profileView?.uid !== uid) return;
+        profileView.mascot = mascot;
+        renderProfile();
+      }));
+    }
     profileView.unsubs.push(
       watchUserProfile(uid, (profile) => {
         if (profileView?.uid !== uid) return;
@@ -908,12 +949,13 @@ const stat = (value, label, onclick) => onclick
 // Avatar pequeño de cualquier usuario: inicial al momento y foto/color cuando llega su perfil.
 function miniAvatar(uid, name = "", cls = "") {
   const el = h("span", { class: `mini-avatar ${cls}`, dataset: { color: "orange" }, text: (name || "?").charAt(0) });
-  getPublicProfile(uid).then((p) => {
+  getPublicProfile(uid).then(async (p) => {
     if (!p) return;
     el.dataset.color = AVATAR_COLORS.includes(p.avatarColor) ? p.avatarColor : "orange";
-    el.replaceChildren(p.photoURL
-      ? h("img", { src: p.photoURL, alt: "", referrerpolicy: "no-referrer", loading: "lazy" })
-      : tuxLogo("avatar-tux"));
+    const src = photoSrc(p.photoURL);
+    el.replaceChildren(src
+      ? h("img", { src, alt: "", referrerpolicy: "no-referrer", loading: "lazy" })
+      : mascotSvg((await getMascot(uid))?.equipped, "avatar-tux"));
   });
   return el;
 }
@@ -971,7 +1013,8 @@ function renderProfile() {
 
   const actions = own
     ? h("div", { class: "profile-actions" },
-        h("button", { class: "profile-edit", type: "button", onclick: openEditProfile }, "Editar perfil"))
+        h("button", { class: "profile-edit", type: "button", onclick: openEditProfile }, "Editar perfil"),
+        h("button", { class: "profile-edit", type: "button", onclick: openMascotEditor }, svgUse("i-sparkle"), "Personalizar Tux"))
     : h("div", { class: "profile-actions" },
         followButton(view.uid),
         h("button", {
@@ -993,7 +1036,7 @@ function renderProfile() {
 
   root.replaceChildren(
     h("div", { class: "profile-head" },
-      own ? avatarElement(p, { interactive: true }) : avatarElement(p),
+      own ? avatarElement(p, { interactive: true, mascot: state.mascot }) : avatarElement(p, { mascot: view.mascot }),
       h("h1", { class: "profile-name", text: name }),
       p.bio && h("p", { class: "profile-bio", text: p.bio }),
       since && h("p", { class: "profile-since", text: `En Tux desde ${since}` }),
@@ -1048,12 +1091,11 @@ function profileTabs(view, { own, proofs, plans }) {
 
 // Miniatura de una prueba en la rejilla del perfil (los archivos del HDD requieren sesión).
 function proofTile(proof) {
-  const src = canViewMedia(proof.url) ? mediaThumbUrl(proof) : "";
   return h("button", {
     class: "tile", type: "button", "aria-label": proof.activityTitle,
     onclick: () => openProof(proof)
   },
-    src ? h("img", { src, alt: "", loading: "lazy" }) : h("span", { class: "tile-locked" }, svgUse(state.user ? "i-image" : "i-lock")),
+    proofMedia(proof) || h("span", { class: "tile-locked" }, svgUse(state.user ? "i-image" : "i-lock")),
     (proof.is360 || proof.type === "video") && h("span", { class: "tile-mark" },
       proof.is360 ? svgUse("i-orbit") : svgUse("i-play")),
     h("span", { class: "tile-title", text: proof.activityTitle })
@@ -1493,14 +1535,12 @@ watchVrProofs((items) => {
 }, (err) => console.warn("Tux: no se pudo cargar la galería VR.", err));
 
 function vrTile(item) {
-  const visible = canViewMedia(item.url);
+  const media = proofMedia({ ...item, is360: true, thumbUrl: item.thumbUrl || item.url });
   return h("button", {
     class: "vr-tile", type: "button", "aria-label": `Ver ${item.activityTitle} en 360°`,
     onclick: () => openProof({ ...item, is360: true })
   },
-    visible
-      ? h("img", { src: mediaThumbUrl(item) || resolveMediaUrl(item.url), alt: "", loading: "lazy" })
-      : h("span", { class: "tile-locked" }, svgUse(state.user ? "i-orbit" : "i-lock")),
+    media || h("span", { class: "tile-locked" }, svgUse(state.user ? "i-orbit" : "i-lock")),
     h("span", { class: "badge-360" }, svgUse("i-orbit"), item.type === "video" ? "Vídeo 360°" : "360°"),
     h("span", { class: "vr-tile-info" },
       h("b", { text: item.activityTitle }),
@@ -1537,8 +1577,23 @@ function renderVr() {
    ========================================================== */
 const LOCAL_IMAGE_REF = /^local:users\/[A-Za-z0-9]+\/[0-9a-f-]{36}(\.thumb)?\.(jpg|png)$/;
 
+// Miniatura de una prueba: las 360° se dibujan como panorámica apuntando a la portada del autor;
+// el resto (o sin WebGL) como imagen. null si no se puede mostrar (sin sesión / sin miniatura).
+function proofMedia(proof, { interactive = false, onTap } = {}) {
+  const src = canViewMedia(proof.url) ? mediaThumbUrl(proof) : "";
+  if (!src) return null;
+  const img = () => h("img", { src, alt: "", loading: "lazy", onerror: (e) => e.currentTarget.remove() });
+  if (!proof.is360) return img();
+  const holder = h("span", { class: "pano-holder" });
+  const canvas = mountPanoThumb(holder, { src, view: proof.cover, interactive, onTap });
+  if (!canvas) return img();
+  canvas.addEventListener("error", () => holder.replaceChildren(img()));
+  return holder;
+}
+
 // Abre una prueba en el visor (360° inmersivo si procede) con acceso al autor y a responderle.
-function openProof(proof) {
+// view: encuadre inicial (por defecto, la portada elegida por el autor).
+function openProof(proof, { view = null } = {}) {
   if (!canViewMedia(proof.url)) {
     if (!state.user) return requireAuth(() => openProof(proof));
     return toast("Conectando con el almacenamiento de Tux… inténtalo en unos segundos.");
@@ -1547,10 +1602,14 @@ function openProof(proof) {
   openViewer({
     url: resolveMediaUrl(proof.url), type: proof.type, is360: proof.is360, title: proof.activityTitle,
     sub: [`por @${proof.authorName}`, proof.caption].filter(Boolean).join(" · "),
+    view: view || proof.cover || null,
+    // Solo el autor de una publicación 360° puede fijar la portada (las reglas lo imponen).
+    onSetCover: own && proof.is360 && proof.id && !proof.sample ? (v) => setProofCover(proof.id, v) : null,
     actions: proof.uid && !proof.sample
       ? [
           { icon: "i-user", label: own ? "Tu perfil" : `@${proof.authorName}`, onClick: () => openUserProfile(proof.uid) },
-          !own && { icon: "i-reply", label: "Responder", onClick: () => replyToProof(proof) }
+          !own && { icon: "i-reply", label: "Responder", onClick: () => replyToProof(proof) },
+          !own && { icon: "i-flag", label: "Reportar", onClick: () => openReport(proof) }
         ].filter(Boolean)
       : []
   });
@@ -1564,17 +1623,22 @@ function replyToProof(proof) {
 function postCard(proof) {
   const own = proof.uid === state.user?.uid;
   const visible = canViewMedia(proof.url);
-  const src = visible ? mediaThumbUrl(proof) : "";
   const fallback = () => h("span", { class: "post-locked" },
     svgUse(!visible ? "i-lock" : proof.type === "video" ? "i-play" : "i-image"),
     !visible ? (state.user ? "Conectando con el HDD de Tux…" : "Inicia sesión para ver las pruebas") : "");
-  const media = h("button", {
-    class: "post-media", type: "button", "aria-label": `Ver ${proof.activityTitle}`, onclick: () => openProof(proof)
+  // 360°: miniatura interactiva (arrastrar para mirar) que arranca en la portada; un toque abre el visor.
+  const thumb = proofMedia(proof, { interactive: true, onTap: (view) => openProof(proof, { view }) });
+  const pano = thumb?.classList.contains("pano-holder");
+  const media = h(pano ? "div" : "button", {
+    class: `post-media${pano ? " is-pano" : ""}`, type: pano ? null : "button",
+    "aria-label": pano ? null : `Ver ${proof.activityTitle}`, onclick: pano ? null : () => openProof(proof)
   },
-    src ? h("img", { src, alt: "", loading: "lazy", onerror: (e) => e.currentTarget.replaceWith(fallback()) }) : fallback(),
+    fallback(),
+    thumb,
     h("span", { class: "post-badges" },
       proof.is360 && h("span", { class: "badge-360" }, svgUse("i-orbit"), "360°"),
-      proof.type === "video" && h("span", { class: "badge-360" }, svgUse("i-play"), "Vídeo"))
+      proof.type === "video" && h("span", { class: "badge-360" }, svgUse("i-play"), "Vídeo")),
+    pano && h("span", { class: "pano-hint" }, "Arrastra para mirar")
   );
   return h("article", { class: "post" },
     h("header", { class: "post-head" },
@@ -1593,7 +1657,9 @@ function postCard(proof) {
       h("button", { class: "ghost-btn small", type: "button", onclick: () => openProof(proof) },
         svgUse(proof.is360 ? "i-orbit" : "i-image"), proof.is360 ? "Ver en 360°" : "Ver"),
       !own && h("button", { class: "ghost-btn small accent", type: "button", onclick: () => replyToProof(proof) },
-        svgUse("i-reply"), "Responder")
+        svgUse("i-reply"), "Responder"),
+      !own && h("button", { class: "icon-action post-report", type: "button", "aria-label": "Reportar publicación", onclick: () => openReport(proof) },
+        svgUse("i-flag"))
     )
   );
 }
@@ -1736,7 +1802,7 @@ function updatePrefs(change) {
 
 function renderSettings() {
   const prefs = currentPrefs();
-  const sig = JSON.stringify([mediaServerUrl(), state.user?.uid, state.user?.email, state.profile?.nickname, state.profile?.photoURL,
+  const sig = JSON.stringify([mediaServerUrl(), state.mascot?.equipped, unlockedIds(myStats()).length, state.user?.uid, state.user?.email, state.profile?.nickname, state.profile?.photoURL,
     state.profile?.avatarColor, prefs, historyOf("discarded").length, themePreference(), state.isAdmin, currentStar()?.activity.id]);
   if (!memo("settings", sig)) return;
 
@@ -1776,13 +1842,17 @@ function renderSettings() {
     ? h("section", { class: "settings-card" },
         h("h3", { text: "Cuenta" }),
         h("div", { class: "account-row" },
-          avatarElement(state.profile),
+          avatarElement(state.profile, { mascot: state.mascot }),
           h("div", {},
             h("b", { text: state.profile?.nickname || state.user.displayName || "Pingüino" }),
             h("small", { text: state.user.email || "Cuenta de Google" }))
         ),
         h("button", { class: "settings-row", type: "button", onclick: openEditProfile },
           svgUse("i-edit"), "Editar perfil", svgUse("i-chevron", "icon chev")),
+        h("button", { class: "settings-row", type: "button", onclick: openMascotEditor },
+          svgUse("i-sparkle"), h("span", { class: "row-text" }, "Personalizar mi Tux",
+            h("small", { text: `${unlockedIds(myStats()).length} de ${ITEMS.length} ítems desbloqueados` })),
+          svgUse("i-chevron", "icon chev")),
         h("button", { class: "settings-row danger", type: "button", onclick: signOutUser },
           svgUse("i-logout"), "Cerrar sesión"),
         uidRow(state.user.uid)
@@ -1955,7 +2025,8 @@ function openEditProfile() {
   const p = state.profile || {};
   editForm.nickname.value = p.nickname || "";
   editForm.bio.value = p.bio || "";
-  editForm.photoURL.value = p.photoURL || "";
+  editForm.photoURL.value = isLocalAvatar(p.photoURL) ? "" : p.photoURL || "";
+  renderPhotoPreview();
   $$(".swatch", swatches).forEach((s) => s.classList.toggle("is-active", s.dataset.color === (p.avatarColor || "orange")));
   $("#edit-error").textContent = "";
   updateCounters(editForm);
@@ -1967,9 +2038,12 @@ editForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   const error = $("#edit-error");
   const nickname = editForm.nickname.value.trim();
-  const photoURL = editForm.photoURL.value.trim();
+  const typed = editForm.photoURL.value.trim();
+  const current = state.profile?.photoURL || "";
+  // Campo vacío = se conserva la foto subida al HDD (si la hay).
+  const photoURL = typed || (isLocalAvatar(current) ? current : "");
   if (nickname.length < 2) return (error.textContent = "El nickname necesita al menos 2 caracteres.");
-  if (!isValidImageUrl(photoURL)) return (error.textContent = "La foto debe ser una URL https.");
+  if (!isValidImageUrl(typed)) return (error.textContent = "La foto debe ser una URL https.");
   const submit = $('button[type="submit"]', editForm);
   setLoading(submit, true);
   try {
@@ -1977,6 +2051,7 @@ editForm.addEventListener("submit", async (e) => {
       nickname, bio: editForm.bio.value, photoURL,
       avatarColor: $(".swatch.is-active", swatches)?.dataset.color || "orange"
     });
+    if (typed && isLocalAvatar(current)) deleteMediaRef(current, state.user).catch(() => {});
     closeModal(editModal);
     toast("Perfil actualizado");
   } catch (err) {
@@ -1984,6 +2059,186 @@ editForm.addEventListener("submit", async (e) => {
     error.textContent = "No se pudo guardar. Inténtalo de nuevo.";
   } finally {
     setLoading(submit, false);
+  }
+});
+
+/* ---------- Foto de perfil (recortada y guardada en users/{uid}/avatar.jpg) ---------- */
+const photoInput = $("#photo-input");
+
+function renderPhotoPreview() {
+  $("#photo-preview").replaceChildren(avatarElement(state.profile, { mascot: state.mascot }));
+  $("#photo-remove").hidden = !state.profile?.photoURL;
+}
+
+$("#photo-upload").addEventListener("click", () => photoInput.click());
+photoInput.addEventListener("change", async () => {
+  const file = photoInput.files[0];
+  photoInput.value = "";
+  if (!file || !state.user) return;
+  if (!file.type.startsWith("image/")) return toast("Elige una imagen JPG, PNG o WebP.");
+  const blob = await cropImage(file);
+  if (!blob) return;
+  const btn = $("#photo-upload");
+  setLoading(btn, true);
+  try {
+    const ref = await uploadAvatar(blob, state.user);
+    await updateUserProfile(state.user.uid, { photoURL: ref });
+    editForm.photoURL.value = "";
+    toast("Foto de perfil actualizada");
+  } catch (err) {
+    console.error(err);
+    toast(err.message || "No se pudo subir la foto.");
+  } finally {
+    setLoading(btn, false);
+  }
+});
+
+$("#photo-remove").addEventListener("click", async () => {
+  const old = state.profile?.photoURL;
+  if (!old) return;
+  try {
+    await updateUserProfile(state.user.uid, { photoURL: "" });
+    if (isLocalAvatar(old)) await deleteMediaRef(old, state.user).catch(() => {});
+    editForm.photoURL.value = "";
+    toast("Foto quitada · vuelve tu Tux");
+  } catch (err) {
+    console.error(err);
+    toast("No se pudo quitar la foto.");
+  }
+});
+
+/* ==========================================================
+   Mascota Tux personalizable
+   ========================================================== */
+const mascotModal = $("#mascot-modal");
+let mascotSlot = "hat";
+let mascotDraft = null;
+let mascotTimer;
+
+// Progreso con el que se desbloquean ítems.
+function myStats() {
+  const completed = historyOf("completed");
+  return {
+    completed: completed.length,
+    vr: completed.filter((e) => e.is360).length,
+    followers: state.profile?.followersCount || 0,
+    following: state.profile?.followingCount || 0,
+    plans: state.myPlans.length
+  };
+}
+
+// Guarda los ítems recién desbloqueados en userAvatars/{uid} y lo celebra.
+let unlockSaving = false;
+function syncUnlocks() {
+  if (!state.user || !state.profileLoaded || !state.historyLoaded || state.mascot === undefined || unlockSaving) return;
+  const known = state.mascot?.unlocked || [];
+  const fresh = unlockedIds(myStats()).filter((id) => !known.includes(id));
+  if (!fresh.length) return;
+  unlockSaving = true;
+  saveMascot(state.user.uid, { equipped: state.mascot?.equipped || EMPTY_EQUIPPED, unlocked: [...known, ...fresh] })
+    .then(() => {
+      const earned = fresh.map(itemById).filter((i) => i.need);
+      if (earned.length) toast(`¡Nuevo para tu Tux! ${earned.map((i) => `${i.emoji} ${i.label}`).join(", ")}`);
+    })
+    .catch((err) => console.warn("Tux: no se pudieron guardar los desbloqueos.", err))
+    .finally(() => { unlockSaving = false; });
+}
+
+function openMascotEditor() {
+  if (!requireAuth(openMascotEditor)) return;
+  mascotDraft = { ...EMPTY_EQUIPPED, ...(state.mascot?.equipped || {}) };
+  renderMascotEditor();
+  openModal(mascotModal);
+}
+
+function renderMascotEditor() {
+  if (!mascotDraft) return;
+  const stats = myStats();
+  const unlocked = new Set([...(state.mascot?.unlocked || []), ...unlockedIds(stats)]);
+  $("#mascot-stage").replaceChildren(h("div", { class: "avatar mascot-avatar", dataset: { color: state.profile?.avatarColor || "orange" } },
+    mascotSvg(mascotDraft, "avatar-tux")));
+  $("#mascot-progress").textContent = `${unlocked.size} de ${ITEMS.length} ítems desbloqueados · completa planes, comparte 360° y haz amigos para conseguir más`;
+  $("#mascot-slots").replaceChildren(...SLOTS.map((slot) => h("button", {
+    type: "button", role: "tab", class: `tab-chip${slot.id === mascotSlot ? " is-active" : ""}`,
+    onclick: () => { mascotSlot = slot.id; renderMascotEditor(); }
+  }, slot.label)));
+  const pick = (id) => {
+    mascotDraft[mascotSlot] = mascotDraft[mascotSlot] === id ? "" : id;
+    renderMascotEditor();
+    clearTimeout(mascotTimer);
+    mascotTimer = setTimeout(() => {
+      saveMascot(state.user.uid, { equipped: mascotDraft, unlocked: [...unlocked] })
+        .catch((err) => {
+          console.error(err);
+          toast("No se pudo guardar tu Tux.");
+        });
+    }, 400);
+  };
+  $("#mascot-items").replaceChildren(
+    h("button", { type: "button", class: `item-tile${!mascotDraft[mascotSlot] ? " is-on" : ""}`, onclick: () => pick("") },
+      h("span", { class: "item-emoji", text: "∅" }), h("b", { text: "Nada" })),
+    ...ITEMS.filter((item) => item.slot === mascotSlot).map((item) => {
+      const open = unlocked.has(item.id) || isUnlocked(item, stats);
+      return h("button", {
+        type: "button", class: `item-tile${mascotDraft[mascotSlot] === item.id ? " is-on" : ""}${open ? "" : " is-locked"}`,
+        "aria-label": open ? item.label : `${item.label} (bloqueado: ${unlockHint(item)})`,
+        onclick: () => (open ? pick(item.id) : toast(`🔒 ${unlockHint(item)}`))
+      },
+        h("span", { class: "item-preview" }, mascotSvg({ [item.slot]: item.id }, "item-mascot")),
+        h("b", { text: item.label }),
+        !open && h("small", {}, svgUse("i-lock"), unlockHint(item))
+      );
+    })
+  );
+}
+
+/* ==========================================================
+   Reportar publicaciones
+   ========================================================== */
+const reportModal = $("#report-modal");
+const reportForm = $("#report-form");
+let reportTarget = null;
+
+$("#report-reasons").append(...REPORT_REASONS.map((r) =>
+  h("label", { class: "reason" },
+    h("input", { type: "radio", name: "reason", value: r.id }),
+    h("span", { class: "reason-emoji", text: r.emoji }),
+    h("span", { text: r.label }),
+    h("span", { class: "reason-check", "aria-hidden": "true" })
+  )));
+
+reportForm.addEventListener("change", () => { $("#report-submit").disabled = !reportForm.elements.reason.value; });
+
+function openReport(proof) {
+  if (!requireAuth(() => openReport(proof))) return;
+  if (proof.uid === state.user.uid) return;
+  reportTarget = proof;
+  reportForm.reset();
+  $("#report-plan").textContent = proof.activityTitle;
+  $("#report-error").textContent = "";
+  $("#report-submit").disabled = true;
+  openModal(reportModal);
+}
+
+reportForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const reason = reportForm.elements.reason.value;
+  if (!reason || !reportTarget) return;
+  const submit = $("#report-submit");
+  setLoading(submit, true);
+  try {
+    await reportProof(state.user, reportTarget, reason, reportForm.note.value);
+    closeModal(reportModal);
+    toast("Gracias. El equipo de Tux revisará la publicación.");
+  } catch (err) {
+    console.error(err);
+    // El reporte es único por usuario y publicación: un segundo intento lo rechazan las reglas.
+    $("#report-error").textContent = err.code === "permission-denied"
+      ? "Ya habías reportado esta publicación."
+      : "No se pudo enviar el reporte.";
+  } finally {
+    setLoading(submit, false);
+    submit.disabled = !reportForm.elements.reason.value;
   }
 });
 

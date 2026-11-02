@@ -25,6 +25,23 @@ export async function isAdminToken(token, uid) {
   return value;
 }
 
+// ¿Cuenta desactivada por un admin? Existe disabledUsers/{uid} (el usuario puede leer el suyo).
+const disabledCache = new Map();
+export async function isDisabledToken(token, uid) {
+  const cached = disabledCache.get(uid);
+  if (cached && Date.now() - cached.at < 60000) return cached.value;
+  const url = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents/disabledUsers/${encodeURIComponent(uid)}`;
+  let value = false;
+  try {
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+    value = res.ok;
+  } catch {
+    value = false; // Firestore inaccesible: no se bloquea (el token sigue siendo válido).
+  }
+  disabledCache.set(uid, { value, at: Date.now() });
+  return value;
+}
+
 // Devuelve el uid del usuario autenticado o lanza un error 401.
 export async function verifyFirebaseToken(token) {
   if (!token) throw Object.assign(new Error("Falta el token de sesión."), { status: 401 });

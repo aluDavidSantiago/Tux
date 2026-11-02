@@ -215,3 +215,24 @@ a.icon-action { color: var(--text-muted); }
 .admin-server .admin-card-body b { word-break: break-all; }
 .admin-section .ghost-btn.small { display: inline-flex; align-items: center; gap: 6px; align-self: flex-start; }
 .admin-section .ghost-btn .icon { width: 16px; height: 16px; }
+
+/* Usuarios y cuentas */
+.admin-users-search { display: flex; flex-direction: column; gap: 10px; margin-bottom: 8px; }
+.admin-users-search .admin-select { max-width: 420px; }
+.admin-tr.is-disabled { opacity: 0.6; }
+.status-chip {
+  margin-left: 8px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  background: var(--surface-2);
+  color: var(--text-muted);
+}
+.status-chip.off { background: rgba(255, 59, 48, 0.14); color: var(--danger); }
+.admin-subtitle { margin: 24px 0 10px; font-size: 1rem; }
+.admin-table.users .cell-actions { flex-wrap: wrap; }
+
+/* Publicaciones reportadas */
+.admin-card.is-reported { border-color: rgba(255, 59, 48, 0.4); }
+.report-reasons { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }

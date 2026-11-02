@@ -9,7 +9,9 @@ import { STORAGE_ROOT, VOLUME_ROOT, MEDIA_TYPES } from "./config.js";
 
 const USERS_DIR = path.join(STORAGE_ROOT, "users");
 const UID_RE = /^[A-Za-z0-9]{1,128}$/;
-const FILE_RE = /^[0-9a-f-]{36}(\.thumb)?\.(jpg|png|mp4)$/;
+// Pruebas ({uuid}.ext), sus miniaturas ({uuid}.thumb.jpg) y la foto de perfil (avatar.jpg).
+const FILE_RE = /^([0-9a-f-]{36}(\.thumb)?\.(jpg|png|mp4)|avatar\.jpg)$/;
+const MAIN_EXTS = ["mp4", "jpg", "png"];
 
 export const isValidUid = (uid) => UID_RE.test(uid);
 export const isValidFileName = (name) => FILE_RE.test(name);
@@ -114,7 +116,7 @@ function pipeLimited(stream, out, { maxBytes, mime }) {
 }
 
 // Guarda el flujo en un .part y lo renombra al final (nunca deja archivos a medias visibles).
-// role "thumb" requiere mediaId de un vídeo existente del mismo usuario.
+// role "thumb" requiere mediaId de un archivo existente del mismo usuario (vídeo o foto).
 export async function saveUpload({ uid, mime, stream, maxBytes, role = "main", mediaId }) {
   const type = MEDIA_TYPES[mime];
   if (!type) throw Object.assign(new Error("Tipo de archivo no admitido."), { status: 415 });
@@ -124,8 +126,8 @@ export async function saveUpload({ uid, mime, stream, maxBytes, role = "main", m
   let fileName = `${id}.${type.ext}`;
   if (role === "thumb") {
     if (mime !== "image/jpeg") throw Object.assign(new Error("La miniatura debe ser JPG."), { status: 415 });
-    if (!/^[0-9a-f-]{36}$/.test(mediaId || "") || !fs.existsSync(path.join(dir, `${mediaId}.mp4`))) {
-      throw Object.assign(new Error("Vídeo de origen no encontrado."), { status: 404 });
+    if (!/^[0-9a-f-]{36}$/.test(mediaId || "") || !MAIN_EXTS.some((ext) => fs.existsSync(path.join(dir, `${mediaId}.${ext}`)))) {
+      throw Object.assign(new Error("Archivo de origen no encontrado."), { status: 404 });
     }
     id = mediaId;
     fileName = `${id}.thumb.jpg`;
@@ -144,6 +146,23 @@ export async function saveUpload({ uid, mime, stream, maxBytes, role = "main", m
     throw err;
   }
   return { id, fileName, size, key: `local:users/${uid}/${fileName}` };
+}
+
+// Foto de perfil: sobrescribe users/{uid}/avatar.jpg de forma atómica (.part + rename).
+export async function saveAvatar({ uid, stream, maxBytes }) {
+  const dir = await userDir(uid);
+  const finalPath = path.join(dir, "avatar.jpg");
+  const partPath = `${finalPath}.${crypto.randomUUID()}.part`;
+  const out = fs.createWriteStream(partPath, { flags: "wx", mode: 0o600 });
+  try {
+    const size = await pipeLimited(stream, out, { maxBytes, mime: "image/jpeg" });
+    await fsp.rename(partPath, finalPath);
+    return { size, key: `local:users/${uid}/avatar.jpg` };
+  } catch (err) {
+    out.destroy();
+    await fsp.rm(partPath, { force: true });
+    throw err;
+  }
 }
 
 /* ---------- Subidas por trozos (archivos > 100 MB a través del túnel de Cloudflare) ---------- */
@@ -250,7 +269,8 @@ export async function deleteMediaFile(uid, fileName) {
   }
   const dir = path.join(USERS_DIR, uid);
   const targets = [fileName];
-  if (fileName.endsWith(".mp4")) targets.push(fileName.replace(/\.mp4$/, ".thumb.jpg"));
+  // Borrar el archivo principal arrastra su miniatura.
+  if (!fileName.includes(".thumb.") && fileName !== "avatar.jpg") targets.push(fileName.replace(/\.(mp4|jpg|png)$/, ".thumb.jpg"));
   let removed = 0;
   for (const name of targets) {
     const full = path.join(dir, name);
@@ -283,9 +303,16 @@ export async function listUserFiles(uid) {
   return Promise.all(names.map(async (name) => ({ name, bytes: (await fsp.stat(path.join(dir, name))).size })));
 }
 
+// Borrado físico recursivo de la carpeta entera del usuario (admin.js y DELETE /api/admin/users/{uid}).
+// Cancela antes sus subidas en curso. Devuelve cuántos archivos había.
 export async function purgeUser(uid) {
-  if (!isValidUid(uid)) throw new Error("UID no válido.");
-  await fsp.rm(path.join(USERS_DIR, uid), { recursive: true, force: true });
+  if (!isValidUid(uid)) throw Object.assign(new Error("UID no válido."), { status: 400 });
+  for (const [uploadId, up] of pendingUploads) if (up.uid === uid) await dropPending(uploadId);
+  const dir = path.join(USERS_DIR, uid);
+  if (!dir.startsWith(USERS_DIR + path.sep)) throw Object.assign(new Error("Ruta no válida."), { status: 400 });
+  const files = (await fsp.readdir(dir).catch(() => [])).length;
+  await fsp.rm(dir, { recursive: true, force: true });
+  return files;
 }
 
 export async function purgeAll() {

@@ -4,27 +4,31 @@
 //   POST   /api/media                     → sube una prueba de una vez (requiere ID token)
 //   POST   /api/media/uploads             → inicia una subida por trozos ({ mime, size })
 //   PUT    /api/media/uploads/{id}?offset → añade un trozo (≤ 48 MB, bajo el límite de Cloudflare)
+//   PUT    /api/avatar                    → foto de perfil recortada (users/{uid}/avatar.jpg)
 //   DELETE /api/media/users/{uid}/{file}  → borra un archivo (su dueño o un admin)
+//   DELETE /api/admin/users/{uid}         → borrado físico recursivo de la carpeta del usuario (solo admin)
 //   GET    /media/users/{uid}/{file}?k=   → sirve un archivo a usuarios con ticket válido (con rangos)
 //   GET    /health                        → estado del servidor, del disco y URL pública del túnel
+// Las cuentas desactivadas (Firestore disabledUsers/{uid}) no pueden subir ni ver archivos.
 // No existen rutas de listado; la purga masiva solo se hace con admin.js.
 import http from "node:http";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import {
-  PORT, HOST, ALLOWED_ORIGINS, MEDIA_TYPES, THUMB_MAX, USER_QUOTA, UPLOADS_PER_MINUTE, CHUNK_MAX, PENDING_UPLOAD_TTL,
+  PORT, HOST, ALLOWED_ORIGINS, MEDIA_TYPES, THUMB_MAX, AVATAR_MAX, USER_QUOTA, UPLOADS_PER_MINUTE, CHUNK_MAX, PENDING_UPLOAD_TTL,
   PUBLIC_URL, TUNNEL_URL_FILE
 } from "./config.js";
 import {
   initStorage, assertVolumeMounted, saveUpload, resolveMediaFile, userUsage, deleteMediaFile,
-  beginChunkedUpload, appendChunk, pendingBytes, expireStaleUploads
+  beginChunkedUpload, appendChunk, pendingBytes, expireStaleUploads, saveAvatar, purgeUser, isValidUid
 } from "./storage.js";
-import { verifyFirebaseToken, isAdminToken } from "./auth.js";
+import { verifyFirebaseToken, isAdminToken, isDisabledToken } from "./auth.js";
 import { issueTicket, verifyTicket } from "./tickets.js";
 
 const CONTENT_TYPES = { jpg: "image/jpeg", png: "image/png", mp4: "video/mp4" };
-const MEDIA_PATH_RE = /^\/media\/users\/([A-Za-z0-9]{1,128})\/([0-9a-f-]{36}(?:\.thumb)?\.(jpg|png|mp4))$/;
-const DELETE_PATH_RE = /^\/api\/media\/users\/([A-Za-z0-9]{1,128})\/([0-9a-f-]{36}(?:\.thumb)?\.(?:jpg|png|mp4))$/;
+const MEDIA_PATH_RE = /^\/media\/users\/([A-Za-z0-9]{1,128})\/((?:[0-9a-f-]{36}(?:\.thumb)?|avatar)\.(jpg|png|mp4))$/;
+const DELETE_PATH_RE = /^\/api\/media\/users\/([A-Za-z0-9]{1,128})\/((?:[0-9a-f-]{36}(?:\.thumb)?|avatar)\.(?:jpg|png|mp4))$/;
+const ADMIN_USER_RE = /^\/api\/admin\/users\/([A-Za-z0-9]{1,128})$/;
 const CHUNK_PATH_RE = /^\/api\/media\/uploads\/([0-9a-f-]{36})$/;
 
 function corsHeaders(req, { publicRead = false } = {}) {
@@ -162,6 +166,39 @@ async function handleChunk(req, res, match, verifyToken) {
   }
 }
 
+// Foto de perfil: JPG ya recortado en el navegador; sustituye a la anterior.
+async function handleAvatar(req, res, verifyToken) {
+  const cors = corsHeaders(req);
+  const reject = (status, error) => {
+    req.resume();
+    sendJson(res, status, { error }, cors);
+  };
+  if (!cors["Access-Control-Allow-Origin"]) return reject(403, "Origen no permitido.");
+  const uid = await verifyToken(bearer(req));
+  if (rateLimited(uid)) return reject(429, "Demasiadas subidas. Espera un minuto.");
+  if ((req.headers["content-type"] || "").split(";")[0].trim() !== "image/jpeg") return reject(415, "La foto de perfil debe ser JPG.");
+  if (Number(req.headers["content-length"] || 0) > AVATAR_MAX) return reject(413, "La foto de perfil supera 2 MB.");
+  assertVolumeMounted();
+  const saved = await saveAvatar({ uid, stream: req, maxBytes: AVATAR_MAX });
+  sendJson(res, 201, { key: `${saved.key}?v=${Date.now()}`, size: saved.size }, cors);
+}
+
+// Eliminación de cuenta: borra la carpeta física entera del usuario en el HDD. Solo admins.
+async function handleAdminPurge(req, res, match, { verifyToken, isAdmin }) {
+  req.resume();
+  const cors = corsHeaders(req);
+  if (!cors["Access-Control-Allow-Origin"]) return sendJson(res, 403, { error: "Origen no permitido." });
+  const token = bearer(req);
+  const requester = await verifyToken(token);
+  if (!(await isAdmin(token, requester))) return sendJson(res, 403, { error: "Solo un admin puede eliminar cuentas." }, cors);
+  const [, uid] = match;
+  if (!isValidUid(uid)) return sendJson(res, 400, { error: "UID no válido." }, cors);
+  assertVolumeMounted();
+  const files = await purgeUser(uid);
+  console.log(`[tux] carpeta users/${uid} eliminada (${files} archivo/s) por admin ${requester}`);
+  sendJson(res, 200, { uid, files }, cors);
+}
+
 // Borrado sincronizado con Firestore: solo el dueño del archivo o un admin.
 async function handleDelete(req, res, match, { verifyToken, isAdmin }) {
   const cors = corsHeaders(req);
@@ -224,7 +261,13 @@ function handleMedia(req, res, match, url) {
   fs.createReadStream(file.path).pipe(res);
 }
 
-export function createTuxServer({ verifyToken = verifyFirebaseToken, isAdmin = isAdminToken } = {}) {
+export function createTuxServer({ verifyToken = verifyFirebaseToken, isAdmin = isAdminToken, isDisabled = isDisabledToken } = {}) {
+  // Para subir o leer hace falta, además de un token válido, que la cuenta no esté desactivada.
+  const verifyActive = async (token) => {
+    const uid = await verifyToken(token);
+    if (await isDisabled(token, uid)) throw Object.assign(new Error("Tu cuenta de Tux está desactivada."), { status: 403 });
+    return uid;
+  };
   return http.createServer(async (req, res) => {
     const url = new URL(req.url, "http://localhost");
     try {
@@ -244,11 +287,14 @@ export function createTuxServer({ verifyToken = verifyFirebaseToken, isAdmin = i
           { ok: disk, storage: disk ? "HDD" : "desconectado", publicUrl: publicUrl() },
           corsHeaders(req, { publicRead: true }));
       }
-      if (url.pathname === "/api/media/ticket" && req.method === "POST") return await handleTicket(req, res, verifyToken);
-      if (url.pathname === "/api/media" && req.method === "POST") return await handleUpload(req, res, verifyToken);
-      if (url.pathname === "/api/media/uploads" && req.method === "POST") return await handleChunkBegin(req, res, verifyToken);
+      if (url.pathname === "/api/media/ticket" && req.method === "POST") return await handleTicket(req, res, verifyActive);
+      if (url.pathname === "/api/media" && req.method === "POST") return await handleUpload(req, res, verifyActive);
+      if (url.pathname === "/api/media/uploads" && req.method === "POST") return await handleChunkBegin(req, res, verifyActive);
       const chunk = CHUNK_PATH_RE.exec(url.pathname);
-      if (chunk && req.method === "PUT") return await handleChunk(req, res, chunk, verifyToken);
+      if (chunk && req.method === "PUT") return await handleChunk(req, res, chunk, verifyActive);
+      if (url.pathname === "/api/avatar" && req.method === "PUT") return await handleAvatar(req, res, verifyActive);
+      const purge = ADMIN_USER_RE.exec(url.pathname);
+      if (purge && req.method === "DELETE") return await handleAdminPurge(req, res, purge, { verifyToken, isAdmin });
       const del = DELETE_PATH_RE.exec(url.pathname);
       if (del && req.method === "DELETE") return await handleDelete(req, res, del, { verifyToken, isAdmin });
       const match = MEDIA_PATH_RE.exec(url.pathname);

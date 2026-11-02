@@ -3,11 +3,12 @@
 // Las referencias a archivos se guardan como "local:users/{uid}/{archivo}" y se resuelven contra el
 // servidor multimedia activo (mediaConfig.js) con el ticket de lectura de la sesión.
 // proofs/{id}: { uid, authorName, activityId, activityTitle, url, thumbUrl, type, is360,
-//                width, height, caption, createdAt }
+//                width, height, caption, createdAt, cover? { yaw, pitch, fov } (portada 360°, grados) }
 import {
   collection,
   doc,
   addDoc,
+  updateDoc,
   deleteDoc,
   query,
   where,
@@ -61,13 +62,28 @@ function captureVideoFrame(video) {
   });
 }
 
-// Lee dimensiones (y duración y miniatura en vídeo) desde el archivo local.
+// Versión reducida de una foto: las 360° de Insta360 (70+ MP) son pesadas para el feed y superan el
+// tamaño máximo de textura de muchos móviles. 2048 px de ancho para 360°, 1080 px para fotos planas.
+function downscaleImage(img) {
+  const max = isEquirectangular(img.naturalWidth, img.naturalHeight) ? 2048 : 1080;
+  const scale = Math.min(1, max / img.naturalWidth);
+  if (scale === 1 && img.naturalWidth * img.naturalHeight < 1200000) return Promise.resolve(null);
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(img.naturalWidth * scale);
+  canvas.height = Math.round(img.naturalHeight * scale);
+  canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+  return new Promise((resolve) => canvas.toBlob((blob) => resolve(blob), "image/jpeg", 0.85));
+}
+
+// Lee dimensiones (y duración y miniatura) desde el archivo local.
 export function probeMedia(file, kind) {
   const objectUrl = URL.createObjectURL(file);
   return new Promise((resolve, reject) => {
     if (kind === "image") {
       const img = new Image();
-      img.onload = () => resolve({ objectUrl, width: img.naturalWidth, height: img.naturalHeight });
+      img.onload = async () => resolve({
+        objectUrl, width: img.naturalWidth, height: img.naturalHeight, thumbBlob: await downscaleImage(img).catch(() => null)
+      });
       img.onerror = () => reject(new Error("No se pudo leer la imagen."));
       img.src = objectUrl;
     } else {
@@ -184,7 +200,8 @@ export const canViewMedia = (ref) => !isLocalRef(ref) || Boolean(ticket);
 export function resolveMediaUrl(ref) {
   if (!isLocalRef(ref)) return ref;
   const url = `${mediaServerUrl()}/media/${ref.slice("local:".length)}`;
-  return ticket ? `${url}?k=${encodeURIComponent(ticket.value)}` : url;
+  // Las fotos de perfil llevan ?v= (se sobrescriben en la misma ruta): el ticket se añade con &.
+  return ticket ? `${url}${url.includes("?") ? "&" : "?"}k=${encodeURIComponent(ticket.value)}` : url;
 }
 
 // Pruebas antiguas guardadas en Cloudinary: miniatura vía transformación (solo lectura).
@@ -285,8 +302,9 @@ export async function uploadMedia({ file, kind, user, thumbBlob, onProgress }) {
         headers: { Authorization: `Bearer ${token}`, "Content-Type": file.type, "X-Tux-Role": "main" },
         onProgress
       });
+  // Fotos: si no hay versión reducida (o falla), la miniatura es el propio archivo.
   let thumbUrl = kind === "image" ? main.key : "";
-  if (kind === "video" && thumbBlob) {
+  if (thumbBlob) {
     const thumb = await xhrUpload({
       url: `${server}/api/media`,
       body: thumbBlob,
@@ -295,9 +313,30 @@ export async function uploadMedia({ file, kind, user, thumbBlob, onProgress }) {
         "X-Tux-Role": "thumb", "X-Tux-Media-Id": main.id
       }
     }).catch(() => null);
-    thumbUrl = thumb?.key || "";
+    thumbUrl = thumb?.key || thumbUrl;
   }
   return { url: main.key, thumbUrl };
+}
+
+// Foto de perfil ya recortada (JPG). Devuelve la referencia "local:users/{uid}/avatar.jpg?v=…".
+export async function uploadAvatar(blob, user) {
+  const data = await xhrUpload({
+    method: "PUT",
+    url: `${mediaServerUrl()}/api/avatar`,
+    body: blob,
+    headers: { Authorization: `Bearer ${await user.getIdToken()}`, "Content-Type": "image/jpeg" }
+  });
+  return data.key;
+}
+
+export const isLocalAvatar = (ref) => /^local:users\/[A-Za-z0-9]+\/avatar\.jpg/.test(ref || "");
+
+// Portada 360°: ángulo inicial elegido por el autor (grados, redondeados).
+export function setProofCover(proofId, { yaw, pitch, fov }) {
+  const round = (n, min, max) => Math.round(Math.min(max, Math.max(min, n)) * 10) / 10;
+  return updateDoc(doc(db, "proofs", proofId), {
+    cover: { yaw: round(yaw, -180, 180), pitch: round(pitch, -90, 90), fov: round(fov, 30, 120) }
+  });
 }
 
 // Borra físicamente un archivo del HDD a través del servidor (el propio dueño o un admin).
@@ -307,7 +346,7 @@ export async function deleteMediaRef(ref, user) {
   const token = await user.getIdToken();
   let res;
   try {
-    res = await fetch(`${mediaServerUrl()}/api/media/${ref.slice("local:".length)}`, {
+    res = await fetch(`${mediaServerUrl()}/api/media/${ref.slice("local:".length).split("?")[0]}`, {
       method: "DELETE",
       headers: { Authorization: `Bearer ${token}` }
     });

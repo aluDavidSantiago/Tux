@@ -114,3 +114,7 @@ export async function searchUsers(text) {
     ? users.filter((u) => (u.nickname || "").toLowerCase().includes(needle)).slice(0, 20)
     : [];
 }
+
+// ¿Cuenta desactivada o eliminada por un admin? (cada usuario solo puede leer la suya).
+export const isAccountDisabled = (uid) =>
+  getDoc(doc(db, "disabledUsers", uid)).then((snap) => snap.exists()).catch(() => false);

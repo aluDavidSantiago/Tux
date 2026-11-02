@@ -36,7 +36,8 @@ export const MEDIA_TYPES = {
   "image/png": { ext: "png", max: 50 * MB },
   "video/mp4": { ext: "mp4", max: 500 * MB }
 };
-export const THUMB_MAX = 2 * MB;
+export const THUMB_MAX = 4 * MB;      // miniaturas (vídeo) y vistas reducidas 2048 px (fotos 360°)
+export const AVATAR_MAX = 2 * MB;     // foto de perfil recortada (JPG 512×512)
 export const USER_QUOTA = 20 * 1024 * MB;
 export const UPLOADS_PER_MINUTE = 20;
 

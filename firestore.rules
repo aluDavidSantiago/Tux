@@ -2,7 +2,7 @@ rules_version = '2';
 
 // Reglas de seguridad de Tux.
 // Colecciones: users (+ history), activities (+ comments), likes, saved, proofs, notifications, admins,
-// follows, chats (+ messages) y config.
+// follows, chats (+ messages), config, userAvatars (mascota), reports y disabledUsers.
 service cloud.firestore {
   match /databases/{database}/documents {
 
@@ -11,6 +11,10 @@ service cloud.firestore {
     // Admin = existe admins/{uid}. Esa colección solo se escribe desde la consola de Firebase.
     function isAdmin() {
       return signedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+    // Cuenta activa: con sesión y sin disabledUsers/{uid} (lo crea un admin al desactivar o eliminar).
+    function active() {
+      return signedIn() && !exists(/databases/$(database)/documents/disabledUsers/$(request.auth.uid));
     }
     function activityPath(id) { return /databases/$(database)/documents/activities/$(id); }
     function onlyChanged(keys) {
@@ -45,7 +49,10 @@ service cloud.firestore {
         && counter(d, 'followingCount') is int && counter(d, 'followingCount') >= 0
         && d.nickname is string && d.nickname.size() >= 1 && d.nickname.size() <= 24
         && (!('bio' in d) || (d.bio is string && d.bio.size() <= 160))
-        && (!('photoURL' in d) || (d.photoURL is string && d.photoURL.size() <= 500))
+        // Foto: URL https o la foto recortada del propio usuario en el HDD (avatar.jpg?v=marca).
+        && (!('photoURL' in d) || (d.photoURL is string && d.photoURL.size() <= 500
+          && (d.photoURL == '' || d.photoURL.matches('https://.+')
+            || d.photoURL.matches('local:users/' + request.auth.uid + '/avatar[.]jpg([?]v=[0-9]{1,16})?'))))
         && (!('avatarColor' in d) || d.avatarColor in ['orange', 'ice', 'mint', 'lilac', 'night'])
         && (!('prefs' in d) || validPrefs(d.prefs))
         && (!('star' in d) || validStar(d.star));
@@ -96,16 +103,20 @@ service cloud.firestore {
 
     match /users/{uid} {
       allow read: if true;
-      allow create: if isUser(uid) && validUser(request.resource.data)
+      allow create: if isUser(uid) && active() && validUser(request.resource.data)
         && counter(request.resource.data, 'followersCount') == 0
         && counter(request.resource.data, 'followingCount') == 0
         && request.resource.data.createdAt == request.time;
-      allow update: if (isUser(uid) && validUser(request.resource.data)
+      allow update: if (isUser(uid) && active() && validUser(request.resource.data)
           && request.resource.data.createdAt == resource.data.createdAt
           && (followCountersUnchanged() || validFollowingChange()))
-        || (signedIn() && !isUser(uid) && validFollowersChange(uid)
-          && counter(request.resource.data, 'followersCount') >= 0);
-      allow delete: if false;
+        || (active() && !isUser(uid) && validFollowersChange(uid)
+          && counter(request.resource.data, 'followersCount') >= 0)
+        // Admin: al eliminar una cuenta se descuentan los contadores de sus seguidores/seguidos.
+        || (isAdmin() && onlyChanged(['followersCount', 'followingCount'])
+          && counter(request.resource.data, 'followersCount') >= 0
+          && counter(request.resource.data, 'followingCount') >= 0);
+      allow delete: if isAdmin();
 
       match /history/{activityId} {
         allow read, delete: if isUser(uid) || isAdmin();
@@ -152,7 +163,7 @@ service cloud.firestore {
 
     match /activities/{id} {
       allow read: if true;
-      allow create: if signedIn() && validActivity(request.resource.data)
+      allow create: if active() && validActivity(request.resource.data)
         && request.resource.data.authorId == request.auth.uid
         && request.resource.data.likeCount == 0
         && request.resource.data.commentCount == 0
@@ -162,7 +173,7 @@ service cloud.firestore {
 
       match /comments/{commentId} {
         allow read: if true;
-        allow create: if signedIn()
+        allow create: if active()
           && request.resource.data.keys().hasOnly(['authorId', 'authorName', 'text', 'createdAt'])
           && request.resource.data.authorId == request.auth.uid
           && request.resource.data.authorName is string
@@ -176,6 +187,8 @@ service cloud.firestore {
           && (resource.data.authorId == request.auth.uid
             || get(activityPath(id)).data.authorId == request.auth.uid)
           && getAfter(activityPath(id)).data.commentCount == get(activityPath(id)).data.commentCount - 1;
+        // Limpieza en cascada (plan ya borrado o cuenta eliminada): sin tocar contadores.
+        allow delete: if isAdmin();
       }
     }
 
@@ -191,7 +204,8 @@ service cloud.firestore {
     }
 
     match /likes/{likeId} {
-      allow read: if signedIn() && resource.data.uid == request.auth.uid;
+      allow read: if (signedIn() && resource.data.uid == request.auth.uid) || isAdmin();
+      allow delete: if isAdmin();
       allow create: if validRelation(likeId)
         && getAfter(activityPath(request.resource.data.activityId)).data.likeCount
           == get(activityPath(request.resource.data.activityId)).data.likeCount + 1;
@@ -203,14 +217,24 @@ service cloud.firestore {
     }
 
     match /saved/{savedId} {
-      allow read, delete: if signedIn() && resource.data.uid == request.auth.uid;
-      allow create, update: if validRelation(savedId);
+      allow read, delete: if (signedIn() && resource.data.uid == request.auth.uid) || isAdmin();
+      allow create, update: if active() && validRelation(savedId);
     }
 
     // ---------- Pruebas multimedia (Galería VR) ----------
+    // Portada 360°: ángulo inicial (grados) con el que se muestra la publicación.
+    function validCover(c) {
+      return c is map && c.keys().hasOnly(['yaw', 'pitch', 'fov'])
+        && c.yaw is number && c.yaw >= -180 && c.yaw <= 180
+        && c.pitch is number && c.pitch >= -90 && c.pitch <= 90
+        && c.fov is number && c.fov >= 30 && c.fov <= 120;
+    }
+
     match /proofs/{proofId} {
       allow read: if true;
-      allow create: if signedIn()
+      allow update: if active() && resource.data.uid == request.auth.uid
+        && onlyChanged(['cover']) && validCover(request.resource.data.cover);
+      allow create: if active()
         && request.resource.data.keys().hasOnly(['uid', 'authorName', 'activityId', 'activityTitle', 'url',
                                                  'thumbUrl', 'type', 'is360', 'width', 'height', 'caption', 'createdAt'])
         && request.resource.data.uid == request.auth.uid
@@ -250,7 +274,8 @@ service cloud.firestore {
     // follows/{followerUid}_follows_{targetUid}: públicos (listas de seguidores en los perfiles).
     match /follows/{followId} {
       allow read: if true;
-      allow create: if signedIn()
+      allow delete: if isAdmin();
+      allow create: if active()
         && request.resource.data.keys().hasOnly(['followerUid', 'targetUid', 'createdAt'])
         && request.resource.data.followerUid == request.auth.uid
         && request.resource.data.targetUid is string
@@ -288,9 +313,9 @@ service cloud.firestore {
     }
 
     match /chats/{chatId} {
-      allow get: if chatMember(chatId);
-      allow list: if signedIn() && request.auth.uid in resource.data.members;
-      allow create: if chatMember(chatId)
+      allow get: if chatMember(chatId) || isAdmin();
+      allow list: if isAdmin() || (signedIn() && request.auth.uid in resource.data.members);
+      allow create: if chatMember(chatId) && active()
         && request.resource.data.keys().hasOnly(['members', 'lastMessage', 'updatedAt', 'lastRead'])
         && request.resource.data.members is list
         && request.resource.data.members.size() == 2
@@ -302,17 +327,18 @@ service cloud.firestore {
         && request.resource.data.updatedAt == request.time
         && request.resource.data.lastRead.keys().hasOnly([request.auth.uid]);
       // Enviar (último mensaje) o marcar como leído: cada uno solo toca su propia marca de lectura.
-      allow update: if chatMember(chatId)
+      allow update: if chatMember(chatId) && active()
         && request.resource.data.members == resource.data.members
         && onlyChanged(['lastMessage', 'updatedAt', 'lastRead'])
         && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['lastMessage', 'updatedAt'])
           || (validLastMessage(request.resource.data.lastMessage) && request.resource.data.updatedAt == request.time))
         && request.resource.data.lastRead.diff(resource.data.get('lastRead', {})).affectedKeys().hasOnly([request.auth.uid]);
-      allow delete: if false;
+      // Solo al eliminar una cuenta (el admin borra antes los mensajes).
+      allow delete: if isAdmin();
 
       match /messages/{messageId} {
-        allow read: if chatMember(chatId);
-        allow create: if chatMember(chatId)
+        allow read: if chatMember(chatId) || isAdmin();
+        allow create: if chatMember(chatId) && active()
           && request.resource.data.keys().hasOnly(['senderId', 'text', 'createdAt', 'replyTo'])
           && request.resource.data.senderId == request.auth.uid
           && request.resource.data.text is string
@@ -322,7 +348,7 @@ service cloud.firestore {
           && (!('replyTo' in request.resource.data) || validReply(request.resource.data.replyTo))
           && getAfter(chatPath(chatId)).data.updatedAt == request.time;
         allow update: if false;
-        allow delete: if chatMember(chatId) && resource.data.senderId == request.auth.uid;
+        allow delete: if (chatMember(chatId) && resource.data.senderId == request.auth.uid) || isAdmin();
       }
     }
 
@@ -337,6 +363,57 @@ service cloud.firestore {
           || request.resource.data.serverUrl.matches('http://(localhost|127[.]0[.]0[.]1)(:[0-9]+)?'))
         && request.resource.data.updatedBy == request.auth.uid
         && request.resource.data.updatedAt == request.time;
+      allow delete: if isAdmin();
+    }
+
+    // ---------- Mascota Tux personalizable ----------
+    // userAvatars/{uid}: ítems equipados por hueco y lista de desbloqueados (cosmético).
+    function itemIn(v, ids) { return v is string && (v == '' || v in ids); }
+    function validMascot(d) {
+      return d.keys().hasOnly(['equipped', 'unlocked', 'updatedAt'])
+        && d.equipped is map && d.equipped.keys().hasOnly(['hat', 'outfit', 'accessory', 'background'])
+        && itemIn(d.equipped.get('hat', ''), ['cap', 'beanie', 'party', 'crown'])
+        && itemIn(d.equipped.get('outfit', ''), ['scarf', 'bowtie', 'tshirt', 'medal'])
+        && itemIn(d.equipped.get('accessory', ''), ['sunglasses', 'flower', 'headphones', 'vr', 'camera'])
+        && itemIn(d.equipped.get('background', ''), ['ice', 'sunset', 'night', 'aurora'])
+        && d.unlocked is list && d.unlocked.size() <= 40
+        && d.updatedAt == request.time;
+    }
+
+    match /userAvatars/{uid} {
+      allow read: if true;
+      allow create, update: if isUser(uid) && active() && validMascot(request.resource.data);
+      allow delete: if isUser(uid) || isAdmin();
+    }
+
+    // ---------- Publicaciones reportadas ----------
+    // reports/{proofId}_{reporterUid}: un reporte por usuario y publicación. Solo los admins los ven.
+    match /reports/{reportId} {
+      allow read, delete: if isAdmin();
+      allow create: if active()
+        && request.resource.data.keys().hasOnly(['proofId', 'proofUid', 'activityTitle', 'reporterUid', 'reason', 'note', 'createdAt'])
+        && request.resource.data.reporterUid == request.auth.uid
+        && request.resource.data.proofId is string
+        && reportId == request.resource.data.proofId + '_' + request.auth.uid
+        && request.resource.data.proofUid == get(/databases/$(database)/documents/proofs/$(request.resource.data.proofId)).data.uid
+        && request.resource.data.proofUid != request.auth.uid
+        && request.resource.data.activityTitle is string && request.resource.data.activityTitle.size() <= 80
+        && request.resource.data.reason in ['inappropriate', 'spam', 'fake', 'privacy', 'other']
+        && request.resource.data.note is string && request.resource.data.note.size() <= 280
+        && request.resource.data.createdAt == request.time;
+      allow update: if false;
+    }
+
+    // ---------- Cuentas desactivadas / eliminadas ----------
+    match /disabledUsers/{uid} {
+      allow read: if isUser(uid) || isAdmin();
+      allow create, update: if isAdmin() && uid != request.auth.uid
+        && request.resource.data.keys().hasOnly(['reason', 'deleted', 'disabledBy', 'nickname', 'createdAt'])
+        && request.resource.data.reason is string && request.resource.data.reason.size() <= 200
+        && request.resource.data.deleted is bool
+        && request.resource.data.nickname is string && request.resource.data.nickname.size() <= 24
+        && request.resource.data.disabledBy == request.auth.uid
+        && request.resource.data.createdAt == request.time;
       allow delete: if isAdmin();
     }
 

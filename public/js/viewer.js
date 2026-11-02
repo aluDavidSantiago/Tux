@@ -6,7 +6,7 @@ import { isEquirectangular } from "../../src/media.js";
 
 let session = null;
 let token = 0;
-let modal, stage, soundBtn, loading, actionsBox;
+let modal, stage, soundBtn, loading, actionsBox, coverBtn;
 
 export function initViewer() {
   modal = $("#viewer-modal");
@@ -16,6 +16,9 @@ export function initViewer() {
   // Acciones opcionales sobre el contenido (ver perfil del autor, responder…).
   actionsBox = h("div", { class: "viewer-actions" });
   soundBtn.before(actionsBox);
+  // Botón flotante del autor: fija el ángulo actual como portada de la publicación 360°.
+  coverBtn = h("button", { class: "viewer-cover-btn", type: "button", hidden: true }, svgUse("i-image"), "Fijar como portada");
+  modal.append(coverBtn);
   modal.addEventListener("close", () => {
     token++;
     session?.destroy();
@@ -56,7 +59,9 @@ function probeRemote(url, type) {
 }
 
 // actions: [{ icon, label, onClick }] — botones bajo el título (el visor se cierra al pulsarlos).
-export async function openViewer({ url, type = "image", is360 = false, title = "", sub = "", actions = [] }) {
+// view: encuadre inicial 360° { yaw, pitch, fov }. onSetCover(view): si se indica, el visor muestra
+// «Fijar como portada» en modo inmersivo y entrega el ángulo actual de la cámara.
+export async function openViewer({ url, type = "image", is360 = false, title = "", sub = "", actions = [], view = null, onSetCover = null }) {
   const current = ++token;
   session?.destroy();
   session = null;
@@ -71,6 +76,7 @@ export async function openViewer({ url, type = "image", is360 = false, title = "
     }
   }, svgUse(a.icon), a.label)));
   $("#viewer-badge").hidden = true;
+  coverBtn.hidden = true;
   soundBtn.hidden = type !== "video";
   setSoundIcon(true);
   openModal(modal);
@@ -88,10 +94,25 @@ export async function openViewer({ url, type = "image", is360 = false, title = "
   let media;
   try {
     if (immersive) {
-      const created = await mountVrScene(stage, { url, type });
+      const created = await mountVrScene(stage, { url, type, view });
       if (current !== token || !modal.open) return created.destroy();
       session = created;
       media = created.media;
+      if (onSetCover) {
+        coverBtn.hidden = false;
+        coverBtn.onclick = async () => {
+          coverBtn.disabled = true;
+          try {
+            await onSetCover(created.getView());
+            toast("Portada fijada · así se verá en el feed");
+          } catch (err) {
+            console.error(err);
+            toast("No se pudo guardar la portada.");
+          } finally {
+            coverBtn.disabled = false;
+          }
+        };
+      }
     } else {
       media = type === "video"
         ? h("video", { src: url, autoplay: true, loop: true, playsinline: true, controls: true })

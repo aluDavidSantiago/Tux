@@ -1,13 +1,16 @@
-// Tux · panel de administración: pruebas multimedia, planes, usuarios, notificaciones y servidor
-// multimedia (URL pública del túnel HTTPS hacia el HDD).
+// Tux · panel de administración: pruebas multimedia, publicaciones reportadas, planes, usuarios y
+// cuentas (desactivar / eliminar con borrado físico en el HDD), notificaciones y servidor multimedia.
 // La interfaz solo se muestra a admins, pero los permisos reales los imponen las reglas de
 // Firestore (admins/{uid}) y el servidor del HDD.
 import { CATEGORIES, millis } from "../../src/activities.js";
 import { signInWithGoogle, signInWithEmail, logOut, watchSession, authErrorMessage } from "../../src/auth.js";
 import {
   isAdminUser, listProofs, listActivities, listUsers, listSentNotifications,
-  adminRemoveProofMedia, adminDeleteProof, adminDeleteActivity, sendNotification
+  adminRemoveProofMedia, adminDeleteProof, adminDeleteActivity, sendNotification,
+  listReports, adminDismissReports, adminDeleteReportedProof,
+  listDisabledUsers, adminDisableUser, adminEnableUser, adminDeleteAccount
 } from "../../src/admin.js";
+import { reportLabel } from "../../src/reports.js";
 import {
   resolveMediaUrl, mediaThumbUrl, isEquirectangular, checkMediaServer, startMediaSession, stopMediaSession, onMediaAccessChange
 } from "../../src/media.js";
@@ -44,6 +47,10 @@ const state = {
   sent: [],
   storageOk: null,
   tunnelUrl: "",
+  reports: [],
+  disabled: new Map(),   // uid → disabledUsers/{uid}
+  userQuery: "",
+  userFilter: "all",
   notifyTo: "all"
 };
 
@@ -140,13 +147,17 @@ onMediaAccessChange(() => state.proofs.length && render());
 /* ---------- Datos ---------- */
 async function loadAll() {
   try {
-    const [proofs, activities, users, sent, storage, local] = await Promise.all([
+    const [proofs, activities, users, sent, storage, local, reports, disabled] = await Promise.all([
       listProofs(), listActivities(), listUsers(), listSentNotifications().catch(() => []), checkMediaServer(),
       // En el propio Mac mini: el servidor local anuncia la URL del túnel activo.
-      mediaServerUrl() === DEFAULT_MEDIA_SERVER ? null : checkMediaServer(DEFAULT_MEDIA_SERVER)
+      mediaServerUrl() === DEFAULT_MEDIA_SERVER ? null : checkMediaServer(DEFAULT_MEDIA_SERVER),
+      listReports().catch(() => []), listDisabledUsers().catch(() => [])
     ]);
     const tunnelUrl = normalizeServerUrl(local?.publicUrl || storage.publicUrl);
-    Object.assign(state, { proofs, activities, users, sent, storageOk: storage.ok, tunnelUrl });
+    Object.assign(state, {
+      proofs, activities, users, sent, storageOk: storage.ok, tunnelUrl, reports,
+      disabled: new Map(disabled.map((d) => [d.id, d]))
+    });
     render();
   } catch (err) {
     console.error(err);
@@ -157,8 +168,9 @@ async function loadAll() {
 /* ---------- Estructura ---------- */
 const TABS = [
   { id: "proofs", label: "Pruebas multimedia" },
+  { id: "reports", label: "Reportadas" },
   { id: "plans", label: "Planes" },
-  { id: "users", label: "Usuarios" },
+  { id: "users", label: "Usuarios y cuentas" },
   { id: "notify", label: "Notificaciones" },
   { id: "server", label: "Servidor multimedia" }
 ];
@@ -169,13 +181,17 @@ function statCard(value, label, accent = false) {
 
 function render() {
   const p360 = state.proofs.filter((p) => p.is360).length;
-  const views = { proofs: renderProofs, plans: renderPlans, users: renderUsers, notify: renderNotify, server: renderServer };
+  const views = {
+    proofs: renderProofs, reports: renderReports, plans: renderPlans, users: renderUsers, notify: renderNotify, server: renderServer
+  };
+  const pendingReports = new Set(state.reports.map((r) => r.proofId)).size;
   main.replaceChildren(
     h("section", { class: "admin-stats" },
       statCard(state.users.length, "Usuarios"),
       statCard(state.activities.length, "Planes publicados"),
       statCard(state.proofs.length, "Pruebas"),
       statCard(p360, "Pruebas 360°", true),
+      statCard(pendingReports, "Publicaciones reportadas", pendingReports > 0),
       h("div", { class: `admin-stat storage ${state.storageOk ? "ok" : "off"}` },
         h("b", { text: state.storageOk ? "HDD conectado" : "HDD no disponible" }),
         h("span", { text: "Servidor de almacenamiento" }))
@@ -184,7 +200,7 @@ function render() {
       TABS.map((t) => h("button", {
         type: "button", role: "tab", class: `tab-chip${t.id === state.tab ? " is-active" : ""}`,
         onclick: () => { state.tab = t.id; render(); }
-      }, t.label)),
+      }, t.label, t.id === "reports" && pendingReports > 0 && h("span", { class: "tab-count", text: pendingReports }))),
       h("button", { class: "tab-chip refresh", type: "button", "aria-label": "Recargar", onclick: loadAll }, svgUse("i-refresh"))
     ),
     views[state.tab]()
@@ -322,27 +338,167 @@ function renderPlans() {
 }
 
 /* ---------- Usuarios ---------- */
+const USER_FILTERS = [
+  { id: "all", label: "Todas", test: () => true },
+  { id: "active", label: "Activas", test: (u) => !state.disabled.has(u.id) },
+  { id: "disabled", label: "Desactivadas", test: (u) => state.disabled.has(u.id) }
+];
+
 function renderUsers() {
-  if (!state.users.length) return h("p", { class: "list-empty", text: "No hay usuarios registrados." });
   const proofsBy = (uid) => state.proofs.filter((p) => p.uid === uid).length;
   const plansBy = (uid) => state.activities.filter((a) => a.authorId === uid).length;
-  const users = [...state.users].sort((a, b) => millis(b.createdAt) - millis(a.createdAt));
-  return h("div", { class: "admin-table users" },
-    h("div", { class: "admin-tr head" }, ["Usuario", "UID", "Registro", "Pruebas", "Planes", ""].map((t) => h("span", { text: t }))),
-    users.map((u) => h("div", { class: "admin-tr" },
-      h("span", { class: "cell-title" },
-        h("span", { class: "avatar mini", dataset: { color: u.avatarColor || "orange" } }, tuxLogo("avatar-tux")),
-        h("b", { text: u.nickname || "—" })),
-      h("span", { "data-label": "UID", class: "cell-uid" },
-        h("code", { text: u.id }),
-        h("button", { class: "icon-action", type: "button", "aria-label": "Copiar UID", onclick: () => navigator.clipboard.writeText(u.id).then(() => toast("UID copiado")) }, svgUse("i-copy"))),
-      h("span", { "data-label": "Registro", text: fmtDate(u.createdAt) }),
-      h("span", { "data-label": "Pruebas", text: String(proofsBy(u.id)) }),
-      h("span", { "data-label": "Planes", text: String(plansBy(u.id)) }),
+  const needle = state.userQuery.trim().toLowerCase();
+  const filter = USER_FILTERS.find((f) => f.id === state.userFilter);
+  const users = [...state.users]
+    .filter((u) => !needle || (u.nickname || "").toLowerCase().includes(needle) || u.id.toLowerCase().includes(needle))
+    .filter(filter.test)
+    .sort((a, b) => millis(b.createdAt) - millis(a.createdAt));
+  // Cuentas eliminadas: ya no tienen users/{uid}, pero su bloqueo sigue en disabledUsers.
+  const deleted = [...state.disabled.values()].filter((d) => d.deleted && !state.users.some((u) => u.id === d.id));
+
+  const search = h("input", {
+    type: "search", class: "admin-select", placeholder: "Buscar por nickname o UID", value: state.userQuery,
+    oninput: (e) => {
+      state.userQuery = e.target.value;
+      const caret = e.target.selectionStart;
+      render();
+      const again = $(".admin-users-search input");
+      again?.focus();
+      again?.setSelectionRange(caret, caret);
+    }
+  });
+
+  return h("section", {},
+    h("div", { class: "admin-users-search" }, search,
+      h("div", { class: "chips admin-filters" }, USER_FILTERS.map((f) => h("button", {
+        class: `chip${f.id === state.userFilter ? " is-active" : ""}`, type: "button",
+        onclick: () => { state.userFilter = f.id; render(); }
+      }, f.label, h("small", { text: String(state.users.filter(f.test).length) }))))),
+    h("p", { class: "form-hint", text: "Desactivar bloquea la cuenta (no puede publicar, chatear ni ver archivos del HDD) y es reversible. Eliminar borra su carpeta del HDD, sus publicaciones, seguidores, chats y perfil; la cuenta de acceso queda bloqueada." }),
+    users.length
+      ? h("div", { class: "admin-table users" },
+          h("div", { class: "admin-tr head" }, ["Usuario", "UID", "Registro", "Pruebas", "Planes", ""].map((t) => h("span", { text: t }))),
+          users.map((u) => userRow(u, proofsBy(u.id), plansBy(u.id))))
+      : h("p", { class: "list-empty", text: "Ningún usuario coincide." }),
+    deleted.length > 0 && h("h3", { class: "admin-subtitle", text: `Cuentas eliminadas (${deleted.length})` }),
+    deleted.length > 0 && h("div", { class: "admin-table users" }, deleted.map((d) => h("div", { class: "admin-tr" },
+      h("span", { class: "cell-title" }, h("b", { text: d.nickname || "—" }), h("span", { class: "status-chip off", text: "Eliminada" })),
+      h("span", { "data-label": "UID", class: "cell-uid" }, h("code", { text: d.id })),
+      h("span", { "data-label": "Fecha", text: fmtDate(d.createdAt) }),
+      h("span", {}), h("span", {}),
       h("span", { class: "cell-actions" },
-        h("button", { class: "ghost-btn small", type: "button", onclick: () => prefillNotify(u.id) }, svgUse("i-bell"), "Notificar"))
-    ))
+        h("button", {
+          class: "ghost-btn small", type: "button", title: "Permite volver a registrarse con la misma cuenta",
+          onclick: (e) => guarded(e.currentTarget, () => adminEnableUser(d.id), "Bloqueo retirado")
+        }, "Desbloquear acceso"))
+    )))
   );
+}
+
+function userRow(u, proofs, plans) {
+  const off = state.disabled.get(u.id);
+  const self = u.id === state.user.uid;
+  return h("div", { class: `admin-tr${off ? " is-disabled" : ""}` },
+    h("span", { class: "cell-title" },
+      h("span", { class: "avatar mini", dataset: { color: u.avatarColor || "orange" } }, tuxLogo("avatar-tux")),
+      h("b", { text: u.nickname || "—" }),
+      off && h("span", { class: "status-chip off", text: "Desactivada" })),
+    h("span", { "data-label": "UID", class: "cell-uid" },
+      h("code", { text: u.id }),
+      h("button", { class: "icon-action", type: "button", "aria-label": "Copiar UID", onclick: () => navigator.clipboard.writeText(u.id).then(() => toast("UID copiado")) }, svgUse("i-copy"))),
+    h("span", { "data-label": "Registro", text: fmtDate(u.createdAt) }),
+    h("span", { "data-label": "Pruebas", text: String(proofs) }),
+    h("span", { "data-label": "Planes", text: String(plans) }),
+    h("span", { class: "cell-actions" },
+      h("button", { class: "ghost-btn small", type: "button", onclick: () => prefillNotify(u.id) }, svgUse("i-bell"), "Notificar"),
+      !self && (off
+        ? h("button", {
+            class: "ghost-btn small", type: "button",
+            onclick: (e) => guarded(e.currentTarget, () => adminEnableUser(u.id), `@${u.nickname} reactivado`)
+          }, svgUse("i-refresh"), "Reactivar")
+        : h("button", {
+            class: "ghost-btn small", type: "button",
+            onclick: async (e) => {
+              const btn = e.currentTarget;
+              const ok = await confirmDialog({
+                title: "Desactivar cuenta",
+                message: `@${u.nickname || u.id} no podrá publicar, comentar, chatear ni ver archivos del HDD. Su contenido se conserva y puedes reactivarla.`,
+                confirmLabel: "Desactivar", icon: "i-shield"
+              });
+              if (ok) guarded(btn, () => adminDisableUser(u, state.user, { reason: "Desactivada por un admin" }), "Cuenta desactivada");
+            }
+          }, svgUse("i-shield"), "Desactivar")),
+      !self && h("button", {
+        class: "ghost-btn small danger", type: "button",
+        onclick: async (e) => {
+          const btn = e.currentTarget;
+          const ok = await confirmDialog({
+            title: "Eliminar cuenta",
+            message: `Se borrará la carpeta entera de @${u.nickname || u.id} en el HDD (${proofs} pruebas y su foto), sus planes, seguidores, chats, reportes y su perfil. No se puede deshacer.`,
+            confirmLabel: "Eliminar definitivamente"
+          });
+          if (!ok) return;
+          guarded(btn, () => adminDeleteAccount(u, state.user, (step) => toast(step)),
+            "Cuenta eliminada · carpeta del HDD y datos borrados");
+        }
+      }, svgUse("i-trash"), "Eliminar"))
+  );
+}
+
+/* ---------- Publicaciones reportadas ---------- */
+function renderReports() {
+  if (!state.reports.length) {
+    return h("p", { class: "list-empty", text: "No hay publicaciones reportadas. 🎉" });
+  }
+  // Agrupadas por publicación, las más reportadas primero.
+  const groups = new Map();
+  state.reports.forEach((r) => {
+    if (!groups.has(r.proofId)) groups.set(r.proofId, []);
+    groups.get(r.proofId).push(r);
+  });
+  const items = [...groups.entries()].sort((a, b) => b[1].length - a[1].length);
+  return h("div", { class: "admin-grid" }, items.map(([proofId, reports]) => reportCard(proofId, reports)));
+}
+
+function reportCard(proofId, reports) {
+  const proof = state.proofs.find((p) => p.id === proofId);
+  const reasons = [...new Set(reports.map((r) => r.reason))];
+  const author = state.users.find((u) => u.id === reports[0].proofUid);
+  const notes = reports.filter((r) => r.note).map((r) => r.note);
+  const dismiss = (btn) => guarded(btn, () => adminDismissReports(proofId), "Reportes descartados");
+  if (!proof) {
+    return h("article", { class: "admin-card" },
+      h("div", { class: "admin-card-body" },
+        h("b", { text: reports[0].activityTitle || "Publicación" }),
+        h("small", { text: "La publicación ya no existe." })),
+      h("div", { class: "admin-actions" },
+        h("button", { class: "ghost-btn small", type: "button", onclick: (e) => dismiss(e.currentTarget) }, "Limpiar reportes")));
+  }
+  const card = proofCard(proof);
+  card.classList.add("is-reported");
+  const body = $(".admin-card-body", card);
+  body.append(
+    h("span", { class: "admin-warning", text: `${reports.length} ${reports.length === 1 ? "reporte" : "reportes"} · @${author?.nickname || proof.authorName}` }),
+    h("div", { class: "report-reasons" }, reasons.map((r) => h("span", { class: "reason-chip", text: reportLabel(r) }))),
+    ...notes.slice(0, 3).map((n) => h("p", { class: "admin-caption", text: `“${n}”` }))
+  );
+  $(".admin-actions", card).replaceChildren(
+    h("button", { class: "ghost-btn small", type: "button", onclick: () => $(".admin-thumb", card).click() }, svgUse("i-eye"), "Ver"),
+    h("button", { class: "ghost-btn small", type: "button", onclick: (e) => dismiss(e.currentTarget) }, svgUse("i-x"), "Descartar"),
+    h("button", {
+      class: "ghost-btn small danger", type: "button",
+      onclick: async (e) => {
+        const btn = e.currentTarget;
+        const ok = await confirmDialog({
+          title: "Eliminar publicación reportada",
+          message: `Se borrarán el archivo del HDD (y su miniatura), la publicación, la entrada del historial de @${proof.authorName} y sus ${reports.length} reportes.`,
+          confirmLabel: "Eliminar en cascada"
+        });
+        if (ok) guarded(btn, () => adminDeleteReportedProof(proof, state.user), "Publicación eliminada");
+      }
+    }, svgUse("i-trash"), "Eliminar en cascada")
+  );
+  return card;
 }
 
 /* ---------- Notificaciones ---------- */
