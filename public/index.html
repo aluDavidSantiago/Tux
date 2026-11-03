@@ -334,13 +334,8 @@
       <h2 id="complete-title">Completar plan</h2>
       <span class="sheet-header-spacer"></span>
     </header>
-    <p class="sheet-lead" id="complete-lead">Para cerrar <b id="complete-plan"></b> adjunta una prueba: una foto o un vídeo corto. También admite 360°/VR.</p>
+    <p class="sheet-lead">Para cerrar <b id="complete-plan"></b> adjunta una prueba: una foto o un vídeo corto. También admite 360°/VR.</p>
     <form class="form" id="complete-form" novalidate>
-      <!-- Quick Share: se elige a qué actividad pertenece la publicación -->
-      <label class="field" id="complete-activity-field" hidden>
-        <span>Actividad</span>
-        <select id="complete-activity" class="select"></select>
-      </label>
       <label class="dropzone" id="dropzone">
         <input type="file" id="proof-input" class="visually-hidden">
         <span class="dropzone-empty" id="dropzone-empty">
@@ -357,10 +352,6 @@
           <span class="toggle-track"><span class="toggle-thumb"></span></span>
           <span>360° / VR</span>
         </label>
-      </div>
-      <div class="cover-row" id="cover-row" hidden>
-        <button class="ghost-btn small" type="button" id="cover-pick"><svg class="icon"><use href="#i-orbit"/></svg>Elegir portada 360°</button>
-        <span class="cover-info" id="cover-info"></span>
       </div>
       <label class="field">
         <span>Comentario <em class="hint">opcional</em></span>

@@ -5,8 +5,6 @@
 //   POST   /api/media/uploads             → inicia una subida por trozos ({ mime, size })
 //   PUT    /api/media/uploads/{id}?offset → añade un trozo (≤ 48 MB, bajo el límite de Cloudflare)
 //   PUT    /api/avatar                    → foto de perfil recortada (users/{uid}/avatar.jpg)
-//   GET/POST/DELETE /api/quick/key        → estado / emitir / revocar la clave de Quick Share (ID token)
-//   POST   /api/quick/upload              → subida desde un Atajo de iOS con la clave (X-Tux-Key)
 //   DELETE /api/media/users/{uid}/{file}  → borra un archivo (su dueño o un admin)
 //   DELETE /api/admin/users/{uid}         → borrado físico recursivo de la carpeta del usuario (solo admin)
 //   GET    /media/users/{uid}/{file}?k=   → sirve un archivo a usuarios con ticket válido (con rangos)
@@ -18,14 +16,12 @@ import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import {
   PORT, HOST, ALLOWED_ORIGINS, MEDIA_TYPES, THUMB_MAX, AVATAR_MAX, USER_QUOTA, UPLOADS_PER_MINUTE, CHUNK_MAX, PENDING_UPLOAD_TTL,
-  PUBLIC_URL, TUNNEL_URL_FILE, QUICK_MAX, APP_UPLOAD_URL
+  PUBLIC_URL, TUNNEL_URL_FILE
 } from "./config.js";
 import {
   initStorage, assertVolumeMounted, saveUpload, resolveMediaFile, userUsage, deleteMediaFile,
-  beginChunkedUpload, appendChunk, pendingBytes, expireStaleUploads, saveAvatar, purgeUser, isValidUid, sniffMime
+  beginChunkedUpload, appendChunk, pendingBytes, expireStaleUploads, saveAvatar, purgeUser, isValidUid
 } from "./storage.js";
-import { Readable } from "node:stream";
-import { issueQuickKey, revokeQuickKey, quickKeyStatus, verifyQuickKey } from "./quick.js";
 import { verifyFirebaseToken, isAdminToken, isDisabledToken } from "./auth.js";
 import { issueTicket, verifyTicket } from "./tickets.js";
 
@@ -187,59 +183,6 @@ async function handleAvatar(req, res, verifyToken) {
   sendJson(res, 201, { key: `${saved.key}?v=${Date.now()}`, size: saved.size }, cors);
 }
 
-// Clave de Quick Share: la gestiona el propio usuario desde Ajustes (requiere sesión de Firebase).
-async function handleQuickKey(req, res, verifyToken) {
-  req.resume();
-  const cors = corsHeaders(req);
-  if (!cors["Access-Control-Allow-Origin"]) return sendJson(res, 403, { error: "Origen no permitido." });
-  const uid = await verifyToken(bearer(req));
-  if (req.method === "GET") return sendJson(res, 200, quickKeyStatus(uid), cors);
-  if (req.method === "DELETE") return sendJson(res, 200, { revoked: revokeQuickKey(uid) }, cors);
-  const base = publicUrl() || `http://localhost:${PORT}`;
-  sendJson(res, 201, { ...issueQuickKey(uid), uploadUrl: `${base}/api/quick/upload` }, cors);
-}
-
-// Lee el primer trozo para deducir el tipo y devuelve un flujo equivalente al original.
-async function peekStream(req) {
-  const it = req[Symbol.asyncIterator]();
-  const first = await it.next();
-  const head = first.done ? Buffer.alloc(0) : first.value;
-  const rest = (async function* () {
-    if (!first.done) yield head;
-    for (let r = await it.next(); !r.done; r = await it.next()) yield r.value;
-  })();
-  return { head, stream: Readable.from(rest, { objectMode: false }) };
-}
-
-// Subida desde el Atajo (NFC): sin navegador, así que sin CORS; la autoriza la clave personal.
-// Devuelve la URL de la app que abre directamente el modal de publicación con el archivo.
-async function handleQuickUpload(req, res) {
-  const reject = (status, error) => {
-    req.resume();
-    sendJson(res, status, { error });
-  };
-  const key = req.headers["x-tux-key"] || bearer(req);
-  const uid = verifyQuickKey(key);
-  if (rateLimited(uid)) return reject(429, "Demasiadas subidas. Espera un minuto.");
-  const declared = Number(req.headers["content-length"] || 0);
-  if (declared > QUICK_MAX) return reject(413, "Supera 95 MB: los vídeos grandes súbelos desde la app (por trozos).");
-  if ((await userUsage(uid)) + pendingBytes(uid) + declared > USER_QUOTA) {
-    return reject(507, "Has alcanzado tu espacio máximo de almacenamiento.");
-  }
-  assertVolumeMounted();
-  const { head, stream } = await peekStream(req);
-  let mime = (req.headers["content-type"] || "").split(";")[0].trim();
-  if (!MEDIA_TYPES[mime]) mime = sniffMime(head);
-  if (mime === "image/heic") return reject(415, "Foto HEIC: añade «Convertir imagen» a JPEG en el atajo.");
-  if (!MEDIA_TYPES[mime]) return reject(415, "Formato no admitido. Usa JPG, PNG o MP4.");
-  const saved = await saveUpload({ uid, mime, stream, maxBytes: Math.min(QUICK_MAX, MEDIA_TYPES[mime].max) });
-  console.log(`[tux] quick share ${uid}/${saved.fileName} (${(saved.size / 1048576).toFixed(1)} MB)`);
-  sendJson(res, 201, {
-    ok: true, file: saved.fileName, key: saved.key, size: saved.size,
-    openUrl: `${APP_UPLOAD_URL}?quick=${encodeURIComponent(saved.fileName)}`
-  });
-}
-
 // Eliminación de cuenta: borra la carpeta física entera del usuario en el HDD. Solo admins.
 async function handleAdminPurge(req, res, match, { verifyToken, isAdmin }) {
   req.resume();
@@ -252,7 +195,6 @@ async function handleAdminPurge(req, res, match, { verifyToken, isAdmin }) {
   if (!isValidUid(uid)) return sendJson(res, 400, { error: "UID no válido." }, cors);
   assertVolumeMounted();
   const files = await purgeUser(uid);
-  revokeQuickKey(uid);
   console.log(`[tux] carpeta users/${uid} eliminada (${files} archivo/s) por admin ${requester}`);
   sendJson(res, 200, { uid, files }, cors);
 }
@@ -351,8 +293,6 @@ export function createTuxServer({ verifyToken = verifyFirebaseToken, isAdmin = i
       const chunk = CHUNK_PATH_RE.exec(url.pathname);
       if (chunk && req.method === "PUT") return await handleChunk(req, res, chunk, verifyActive);
       if (url.pathname === "/api/avatar" && req.method === "PUT") return await handleAvatar(req, res, verifyActive);
-      if (url.pathname === "/api/quick/key" && ["GET", "POST", "DELETE"].includes(req.method)) return await handleQuickKey(req, res, verifyActive);
-      if (url.pathname === "/api/quick/upload" && req.method === "POST") return await handleQuickUpload(req, res);
       const purge = ADMIN_USER_RE.exec(url.pathname);
       if (purge && req.method === "DELETE") return await handleAdminPurge(req, res, purge, { verifyToken, isAdmin });
       const del = DELETE_PATH_RE.exec(url.pathname);

@@ -43,10 +43,4 @@ export const UPLOADS_PER_MINUTE = 20;
 
 // Cloudflare limita cada petición a 100 MB: los archivos grandes se suben por trozos.
 export const CHUNK_MAX = 48 * MB;
-
-// Quick Share (Atajo de iOS / NFC): una sola petición, así que por debajo del límite de Cloudflare.
-export const QUICK_MAX = 95 * MB;
-export const QUICK_KEYS_FILE = process.env.TUX_QUICK_KEYS_FILE || path.join(os.homedir(), ".tux/quick-keys.json");
-// Página de la app que abre el Atajo tras subir (GitHub Pages; /upload/ redirige a /public/).
-export const APP_UPLOAD_URL = process.env.TUX_APP_URL || "https://aludavidsantiago.github.io/Tux/upload/";
 export const PENDING_UPLOAD_TTL = 60 * 60 * 1000;

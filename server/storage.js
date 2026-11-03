@@ -58,18 +58,6 @@ function matchesSignature(mime, head) {
   return false;
 }
 
-// Tipo real a partir de los primeros bytes (los Atajos de iOS no siempre envían Content-Type).
-export function sniffMime(head) {
-  if (head.length < 12) return "";
-  if (head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff) return "image/jpeg";
-  if (head.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return "image/png";
-  if (head.subarray(4, 8).toString("ascii") === "ftyp") {
-    // HEIC/HEIF (fotos del iPhone) también usan cajas ftyp: se distinguen por la marca.
-    return /^(heic|heix|hevc|heim|heis|mif1|msf1)$/.test(head.subarray(8, 12).toString("ascii")) ? "image/heic" : "video/mp4";
-  }
-  return "";
-}
-
 export async function userUsage(uid) {
   if (!isValidUid(uid)) return 0;
   const dir = path.join(USERS_DIR, uid);

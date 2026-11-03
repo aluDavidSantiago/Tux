@@ -2200,38 +2200,3 @@ svg.mascot image { image-rendering: auto; }
 .item-preview { width: 64px; height: 64px; display: grid; place-items: center; }
 .item-preview svg { width: 100%; height: 100%; }
 .item-emoji { width: 64px; height: 64px; display: grid; place-items: center; font-size: 1.6rem; color: var(--text-muted); }
-
-/* ==========================================================
-   v1.4 · Quick Share (Atajo de iOS + NFC)
-   ========================================================== */
-.field select.select {
-  width: 100%;
-  padding: 13px 14px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-  background: var(--surface);
-  color: var(--text);
-  font: inherit;
-}
-.field select.select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); }
-.dropzone.is-loading { pointer-events: none; }
-.dropzone.is-loading .dropzone-icon { animation: quick-pulse 1.2s var(--ease) infinite; }
-.dropzone-preview .pano-holder { position: relative; display: block; width: 100%; aspect-ratio: 16 / 9; max-height: 300px; background: #000; }
-@keyframes quick-pulse { 50% { transform: scale(1.12); opacity: 0.6; } }
-.cover-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-.cover-row[hidden] { display: none; }
-.cover-row .ghost-btn { display: inline-flex; align-items: center; gap: 6px; }
-.cover-row .ghost-btn .icon { width: 16px; height: 16px; color: var(--accent); }
-.cover-info { font-size: 0.78rem; color: var(--text-muted); }
-.quick-key {
-  display: flex; flex-direction: column; gap: 8px;
-  padding: 12px;
-  margin-bottom: 10px;
-  border-radius: var(--radius-sm);
-  border: 1px dashed var(--accent);
-  background: var(--accent-soft);
-}
-.quick-key small { font-size: 0.75rem; color: var(--text-muted); }
-.quick-key code { font-size: 0.72rem; word-break: break-all; user-select: all; }
-.quick-key .ghost-btn { align-self: flex-start; display: inline-flex; align-items: center; gap: 6px; }
-.quick-key .ghost-btn .icon { width: 15px; height: 15px; }
